@@ -33,7 +33,8 @@
 >   只有从源码自己构建、或者要换模型时，才需要按上表手动补。
 > - 以前的 **SigLIP + opus-mt（中译英）+ SFace/YuNet（人脸）已经整体移除**：语义搜索改用中文 CLIP，
 >   人脸链路整体删除（角色识别改用 CCIP）✓
-> - **CCIP 是可选模型**，三个版本共用同一个包 `CCIP模型-20261018.zip`（放在归档根目录），解压到 `<图库>\models\ccip\` ✓
+> - **CCIP 是可选模型**，三个版本共用同一个包 `CCIP模型-20261018.zip`（339 MB，含 `model_feat.onnx` + `metrics.json`），
+>   网盘：<https://pan.baidu.com/s/1ZBRJIwIB7g1vuiTfoed4fA?pwd=6666>　提取码：`6666`　→ 解压到 `<图库>\models\ccip\` ✓
 >   没有它角色识别会自动禁用并提示，其它功能不受影响。
 
 ## 校验
