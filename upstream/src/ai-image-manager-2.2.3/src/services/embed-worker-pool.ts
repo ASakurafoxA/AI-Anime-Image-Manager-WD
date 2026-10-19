@@ -9,7 +9,6 @@ import { captureWorkerOutput } from "@/services/diagnostics/worker-output";
 import {
   getDmlDeviceId,
   hasDuplicatedWorkerDevice,
-  isMultiGpuEnabled,
   MAX_MULTI_GPU_DEVICES,
   probeEmbeddingGpuCapability,
   recordEmbeddingProbeResult,
@@ -17,6 +16,7 @@ import {
   resolveWorkerDevices,
 } from "@/services/gpu-detector";
 import { trackChildProcess } from "@/services/tracked-child-processes";
+import { createRateMeter, type RateMeter } from "@/services/rate-meter";
 
 interface EmbedResult {
   error?: string;
@@ -55,6 +55,8 @@ interface WorkerSlot {
   pendingReject: ((err: Error) => void) | null;
   pendingResolve: ((results: EmbedResult[]) => void) | null;
   process: ChildProcess;
+  /** 自用（2026-10-17）：这个 worker 的实时速率计（4 秒滑动窗口）✓ */
+  rateMeter?: RateMeter;
   status: WorkerStatus;
   timeoutId?: ReturnType<typeof setTimeout> | null;
 }
@@ -94,6 +96,11 @@ const BATCH_RETRY_LIMIT = 3;
 const RETRY_SLOT_WAIT_MS = 120_000;
 
 let slots: WorkerSlot[] = [];
+/**
+ * 派发轮转游标：旧写法从 0 号 worker 开始找，靠前的卡会被喂满、靠后的卡空闲，
+ * 表现为「一张 52 张/秒、另一张 5 张/秒」。现在从游标往后找，命中后 +1。
+ */
+let dispatchCursor = 0;
 let requestQueue: QueuedRequest[] = [];
 let modelPath: string | null = null;
 let workerAdapter: SerializedWorkerAdapter | null = null;
@@ -102,6 +109,17 @@ let poolExecutionProvider: EmbeddingExecutionProvider = "cpu";
 /** 要交给 DirectML 的适配器序号（null = 系统默认适配器，通常是核显）。 */
 let poolDeviceId: number | null = null;
 /** 多卡模式下实际使用的设备清单（每个 worker 一张卡）。 */
+/**
+ * 自用（多卡）：设置变了只打"脏"标记，**不要**在任务跑着的时候关池子
+ * （关池子会让正在跑的任务卡死：批次 promise 没人 resolve，界面就停在"估算中"）。
+ * 下一次 initWorkerPool 时再按要求重建。
+ */
+let poolDirty = false;
+
+/** 标记"下次建向量时按新设置重建池子"。 */
+export function markEmbedPoolDirty(): void {
+  poolDirty = true;
+}
 let poolDevices: Array<number | null> = [];
 /**
  * 自用（多卡·安全闸）：本代池里是否有两个以上 worker 落在**同一张卡**上。
@@ -276,6 +294,8 @@ function spawnWorker(index: number, generation: number): WorkerSlot {
     pendingResolve: null,
     pendingReject: null,
     consecutiveFailures: 0,
+    // 自用（2026-10-17）：每张卡的实时速度 —— 每个 worker 一个 4 秒滑动窗口速率计 ✓
+    rateMeter: createRateMeter(4000),
   };
 
   child.stderr?.on("data", (data: Buffer) => {
@@ -382,6 +402,8 @@ function spawnWorker(index: number, generation: number): WorkerSlot {
         reject?.(new Error("Stale embedding worker result discarded"));
       } else {
         try {
+          // 自用（2026-10-17）：记一批的数量，供"每张卡实时速度"统计 ✓
+          slot.rateMeter?.add(message.results?.length ?? 0);
           resolve?.(validateEmbedResults(message.results));
         } catch (error) {
           reject?.(error instanceof Error ? error : new Error(String(error)));
@@ -604,7 +626,7 @@ function handleWorkerDeath(slot: WorkerSlot): void {
 
 function drainQueue(): void {
   while (requestQueue.length > 0) {
-    const idleSlot = slots.find((s) => s.status === "idle");
+    const idleSlot = pickIdleSlotRotating();
     if (!idleSlot) {
       break;
     }
@@ -770,17 +792,16 @@ async function startWorkerPool(
    * 另外只要解析出的设备列表里出现**重复设备**（例如 `AI_EMBED_WORKERS` 被调大），
    * 也强制串行化 —— 见 `poolDevicesAreShared`。
    */
-  const multiGpuOn = executionProvider === "directml" && isMultiGpuEnabled();
+  /*
+   * 2026-10-19（用户要求）：**多卡并行已整体移除**。
+   * 现在固定"一张卡 + 每卡 worker 数"（配置项默认 4），设备就是「使用显卡」里选中的那张。
+   * 这样就没有"一卡忙一卡闲 / 两张速度对不上"的问题了。
+   */
   poolDevices =
     executionProvider === "directml" ? resolveWorkerDevices() : [];
-  poolDevicesAreShared = hasDuplicatedWorkerDevice(poolDevices);
-  if (multiGpuOn) {
-    poolSize = Math.max(1, Math.min(poolDevices.length, MAX_MULTI_GPU_DEVICES));
-  } else {
-    // 每个 worker ~200MB；单卡时沿用原并发数
-    poolSize = config.workers;
-  }
-  poolSize = Math.max(1, Math.min(poolSize, MAX_MULTI_GPU_DEVICES));
+  poolDevicesAreShared = false;
+  poolSize = Math.max(1, Math.min(config.workers, 8));
+  poolSize = Math.max(1, Math.min(poolSize, 8));
   // 自用：批量与 ORT 线程数直接用配置值（原「占用限制」滑块的缩放已整体删除）
   poolBatchSize = config.batchSize;
   poolIntraOpNumThreads = config.intraOpNumThreads;
@@ -794,9 +815,11 @@ async function startWorkerPool(
   for (let i = 0; i < poolSize; i++) {
     const slot = spawnWorker(i, generation);
     // 多卡：第 i 个 worker 绑定第 i 张卡（超出部分复用最后一张）
+    // 轮转分配：i % len（旧写法把超出的 worker 全塞到最后一张卡上，
+    // 触发「同卡多开」保护 → 整池串行，看起来就是"两张卡只有一张在干活"）
     slot.deviceId =
       poolDevices.length > 0
-        ? (poolDevices[Math.min(i, poolDevices.length - 1)] ?? null)
+        ? (poolDevices[i % poolDevices.length] ?? null)
         : poolDeviceId;
     slots.push(slot);
 
@@ -864,6 +887,13 @@ async function startWorkerPool(
 
 /** Start the persistent worker pool exactly once for a given configuration. */
 export function initWorkerPool(mp: string, useGPU = false): Promise<void> {
+  // 设置变过（多卡/选卡）→ 先按新设置把旧池子关掉再重建
+  if (poolDirty) {
+    poolDirty = false;
+    if (initialized || slots.length > 0) {
+      shutdownPool();
+    }
+  }
   const adapter = getActiveEmbeddingWorkerAdapter(mp);
   const requestedProvider: EmbeddingExecutionProvider = useGPU
     ? "directml"
@@ -959,6 +989,24 @@ export function initWorkerPool(mp: string, useGPU = false): Promise<void> {
  */
 let dispatchChain: Promise<unknown> = Promise.resolve();
 
+/** 从 dispatchCursor 开始轮转找空闲 worker（避免总是选第一个，导致一张卡吃满）。 */
+function pickIdleSlotRotating(): (typeof slots)[number] | undefined {
+  const total = slots.length;
+  if (total === 0) {
+    return undefined;
+  }
+  const start = dispatchCursor % total;
+  for (let offset = 0; offset < total; offset++) {
+    const index = (start + offset) % total;
+    const slot = slots[index];
+    if (slot && slot.status === "idle") {
+      dispatchCursor = (index + 1) % total;
+      return slot;
+    }
+  }
+  return undefined;
+}
+
 function dispatchBatch(
   photos: Array<{ id: number; path: string }>
 ): Promise<EmbedResult[]> {
@@ -988,7 +1036,7 @@ function dispatchBatchNow(
       }
       initWorkerPool(modelPath, poolUseGPU)
         .then(() => {
-          const idleSlot = slots.find((s) => s.status === "idle");
+          const idleSlot = pickIdleSlotRotating();
           if (idleSlot) {
             dispatchToSlot(idleSlot, photos, resolve, reject);
           } else {
@@ -999,7 +1047,7 @@ function dispatchBatchNow(
       return;
     }
 
-    const idleSlot = slots.find((s) => s.status === "idle");
+    const idleSlot = pickIdleSlotRotating();
     if (idleSlot) {
       dispatchToSlot(idleSlot, photos, resolve, reject);
     } else {
@@ -1087,6 +1135,35 @@ export function isPoolReady(): boolean {
   return (
     initialized && slots.some((s) => s.status === "idle" || s.status === "busy")
   );
+}
+
+/**
+ * 自用（2026-10-17，多卡）：**每张卡的实时速度**（张/秒）✓
+ *
+ * 一个 worker = 一张卡（多卡模式下一卡一个），所以这里按 deviceId 汇总即可；
+ * 没在跑任务时返回 0（设置页显示"空闲"）。设置页每 3 秒轮询一次。
+ */
+export function getEmbedPerDeviceStats(): Array<{
+  deviceId: number | null;
+  label: string | null;
+  perSecond: number;
+}> {
+  const byDevice = new Map<number | null, number>();
+  for (const slot of slots) {
+    if (slot.status === "dead") {
+      continue;
+    }
+    const key = slot.deviceId ?? poolDeviceId ?? null;
+    byDevice.set(
+      key,
+      (byDevice.get(key) ?? 0) + (slot.rateMeter?.perSecond() ?? 0)
+    );
+  }
+  return [...byDevice.entries()].map(([deviceId, perSecond]) => ({
+    deviceId,
+    label: null,
+    perSecond: Math.round(perSecond * 10) / 10,
+  }));
 }
 
 export function getPoolHealth(): {

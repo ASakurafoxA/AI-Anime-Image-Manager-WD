@@ -1,5 +1,5 @@
-import { CheckCircle2, MinusCircle, XCircle } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+﻿import { CheckCircle2, MinusCircle, XCircle } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { FilterDropdown } from "@/components/filter-dropdown";
 import { AnimatedActionButton } from "@/components/ui/animated-action-button";
@@ -215,11 +215,10 @@ export function GpuSettingsCard({
     "thumbnail" | "original"
   >("thumbnail");
   // 自用新增：多卡模式（默认关闭；开启后"使用显卡"变成多选，一张卡一个 worker）
-  const [multiGpuEnabled, setMultiGpuEnabled] = useState(false);
-  // 多卡模式下勾选的适配器序号（字符串形式，与下拉选项对齐）
-  const [deviceIds, setDeviceIds] = useState<string[]>([]);
   // 每张卡的实时速度（张/秒）；**长度就是"在用的卡数"**，< 2 时整体不显示
-  const [perCardSpeeds, setPerCardSpeeds] = useState<number[]>([]);
+  const [perCardSpeeds, setPerCardSpeeds] = useState<
+    Array<{ deviceId: number | null; label: string | null; perSecond: number }>
+  >([]);
 
   // ── Load saved state on mount ──────────────────────────────────────
 
@@ -233,8 +232,6 @@ export function GpuSettingsCard({
         setSearchImageSource(
           r.searchImageSource === "original" ? "original" : "thumbnail"
         );
-        setMultiGpuEnabled(Boolean(r.multiGpuEnabled));
-        setDeviceIds((r.deviceIds ?? []).map((id) => String(id)));
         /**
          * 每张卡的实时速度显示（用户 2026-10-09 明确要求）：
          *   · **只用 1 张卡 → 完全不显示**（顶上已有总速度）；
@@ -242,7 +239,6 @@ export function GpuSettingsCard({
          * 卡数由下面的轮询从后端拿（`getGpuSpeeds` 返回实际启用的设备），
          * 所以这里不用额外记状态；初值保持空数组 = 先不显示。
          */
-        setPerCardSpeeds([]);
         onEnabledChange?.(r.enabled);
         if (r.detected) {
           setDetectedInfo(r.detected);
@@ -266,56 +262,6 @@ export function GpuSettingsCard({
       })
       .finally(() => onLoaded?.());
   }, [onEnabledChange, onLoaded, t]);
-
-  /**
-   * 自用（多卡）：每 3 秒取一次"每张卡实时速度"。
-   *
-   * 显示规则（用户明确要求）：**只用 1 张卡时完全不显示**（顶上已有总速度），
-   * **用了 ≥2 张才显示，用几张显示几个**（最多 3 个）。
-   * 所以这里按"实际在用的卡数"决定数组长度；卡数 < 2 时置空数组 → 界面不渲染。
-   *
-   * 用 `setActiveDeviceCount` 的函数式更新：值没变时返回原值，
-   * React 不会因此重复渲染（避免每 3 秒白转一圈）。
-   */
-  useEffect(() => {
-    let cancelled = false;
-    const tick = () => {
-      ipc.client.settings
-        .getGpuSpeeds({})
-        .then((value) => {
-          if (cancelled) {
-            return;
-          }
-          const speeds = (value as { speeds?: Array<{ perSecond: number }> })
-            .speeds;
-          if (!Array.isArray(speeds)) {
-            return;
-          }
-          const values = speeds.map((item) => item.perSecond ?? 0);
-          /**
-           * 用户要求：**单卡（1 张）完全不显示**；**≥2 张才显示，用几张显示几个**（最多 3 个）。
-           * 后端 `getGpuSpeeds` 返回的就是"实际启用的设备"，所以数组长度 = 在用卡数。
-           */
-          setPerCardSpeeds((previous) =>
-            previous.length === values.length &&
-            previous.every((value, index) => value === values[index])
-              ? previous
-              : values.length >= 2
-                ? [...values]
-                : []
-          );
-        })
-        .catch(() => {
-          /* 取不到就保持上一次的数字，不要打断设置页 */
-        });
-    };
-    tick();
-    const timer = setInterval(tick, 3000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, []);
 
   // ── GPU detection ──────────────────────────────────────────────────
   const handleDetect = useCallback(async () => {
@@ -349,6 +295,25 @@ export function GpuSettingsCard({
     }
   }, [enabled, onBusyChange, onEnabledChange, t]);
 
+  /*
+   * 自用（2026-10-18 · 会话#9）：**打开设置页时，若"图像嵌入"这一项还没探测过，自动测一次**。
+   * 否则这一行永远显示"未检测"（用户以为坏了），而且他也分不清是没测过还是真的回退 CPU ✓
+   */
+  const autoDetectRef = useRef(false);
+  useEffect(() => {
+    if (!enabled || autoDetectRef.current) {
+      return;
+    }
+    if (detectedInfo?.embeddingDmlAvailable !== undefined && detectedInfo?.embeddingDmlAvailable !== null) {
+      return;
+    }
+    if (detectPhase !== "idle") {
+      return;
+    }
+    autoDetectRef.current = true;
+    void handleDetect();
+  }, [detectPhase, detectedInfo?.embeddingDmlAvailable, enabled, handleDetect]);
+
   // ── Save ───────────────────────────────────────────────────────────
 
   const handleSave = useCallback(async () => {
@@ -358,11 +323,7 @@ export function GpuSettingsCard({
     try {
       await ipc.client.settings.setGpuSettings({
         deviceId,
-        deviceIds: deviceIds
-          .map((value) => Number.parseInt(value, 10))
-          .filter((value) => Number.isInteger(value) && value >= 0),
         enabled,
-        multiGpuEnabled,
         searchImageSource,
       });
       setSaveStatus(t("gpuSaved"));
@@ -378,9 +339,7 @@ export function GpuSettingsCard({
     }
   }, [
     deviceId,
-    deviceIds,
     enabled,
-    multiGpuEnabled,
     onBusyChange,
     onEnabledChange,
     searchImageSource,
@@ -395,7 +354,6 @@ export function GpuSettingsCard({
     [onEnabledChange]
   );
 
-  const faceGpuActive = enabled && detectedInfo?.dmlAvailable === true;
   const embeddingGpuActive =
     enabled && detectedInfo?.embeddingDmlAvailable === true;
   // 下拉框只列"真显卡"：虚拟显示适配器（向日葵 / UU 远程 / IDD）用户不需要选。
@@ -413,14 +371,41 @@ export function GpuSettingsCard({
   const hasKnownAdapterList = usableAdapters.length > 0;
   const showAdapterSection =
     enabled && (hasKnownAdapterList || Boolean(detectedInfo?.gpuName));
+  /*
+   * 自用（2026-10-17，用户口径）：**「角色识别」这一行要保留，改成跟 CCIP 走** ✓
+   *
+   * 用户原话：「GPU 测试的问题，**角色识别是需要 GPU 的**」——
+   * 原来这行绑在已删除的人脸检测池上，我一开始把它整行删掉了 ✗；
+   * 但角色识别现在跑的是 **CCIP**，它同样走 DirectML（`provider: "dml"`），
+   * 所以显卡能不能用，判据就是通用 DML 探测结论 `dmlAvailable` ✓
+   * （探针已经改用当前嵌入模型当试金石，不再依赖已删的人脸模型）
+   */
+  const characterGpuActive = enabled && detectedInfo?.dmlAvailable === true;
+  let characterStatusKey = "gpuStatusNotEnabled";
+  if (enabled) {
+    if (detectPhase === "detected-error") {
+      characterStatusKey = "gpuStatusProbeFailed";
+    } else if (detectedInfo?.dmlAvailable === true) {
+      characterStatusKey = "gpuStatusActive";
+    } else {
+      characterStatusKey = "gpuStatusCpuFallback";
+    }
+  }
+  /*
+   * 自用（2026-10-18 · 会话#9 用户反馈「图像嵌入 GPU 未检测到，使用 CPU」）：
+   * 这里原来是"没探测过(null) 也当成 CPU 回退"，于是明明在用显卡却显示成 CPU ✗
+   * 现在三态分开：未探测 / 可用 / 确实回退 ✓
+   */
   let embeddingStatusKey = "gpuStatusNotEnabled";
   if (enabled) {
     if (detectPhase === "detected-error" || detectedInfo?.embeddingError) {
       embeddingStatusKey = "gpuStatusProbeFailed";
     } else if (detectedInfo?.embeddingDmlAvailable === true) {
       embeddingStatusKey = "gpuStatusActive";
-    } else {
+    } else if (detectedInfo?.embeddingDmlAvailable === false) {
       embeddingStatusKey = "gpuStatusCpuFallback";
+    } else {
+      embeddingStatusKey = "gpuStatusNotProbed";
     }
   }
 
@@ -470,11 +455,7 @@ export function GpuSettingsCard({
               <FilterDropdown
                 ariaLabel={t("gpuAdapterTitle")}
                 className="w-full max-w-[420px]"
-                multiple={multiGpuEnabled}
                 onChange={(value) => setDeviceId(value)}
-                onValuesChange={(next) =>
-                  setDeviceIds(next.slice(0, 3))
-                }
                 options={[
                   {
                     label: detectedInfo?.gpuName
@@ -490,9 +471,7 @@ export function GpuSettingsCard({
                   })),
                 ]}
                 placeholder={t("gpuAdapterTitle")}
-                showSelectedCheck={multiGpuEnabled}
                 value={deviceId}
-                values={deviceIds}
               />
             </div>
             <p className="text-[11px] text-muted-foreground/60 leading-relaxed [overflow-wrap:anywhere]">
@@ -501,32 +480,7 @@ export function GpuSettingsCard({
           </div>
         )}
 
-        {/* 自用（多卡）：多卡模式开关 —— 默认关闭；开启后上面变成多选 */}
-        {showAdapterSection && (
-          <div className="min-w-0 space-y-1.5 border-border border-t pt-3">
-            <label className="flex min-w-0 items-center justify-between gap-3">
-              <span className="min-w-0 text-[12px] text-muted-foreground">
-                {t("multiGpuTitle")}
-              </span>
-              <Switch
-                aria-label={t("multiGpuTitle")}
-                checked={multiGpuEnabled}
-                onCheckedChange={(next) => {
-                  setMultiGpuEnabled(next);
-                  // 刚开启时至少勾上当前这块卡，避免"开了多卡却没选卡"
-                  if (next && deviceIds.length === 0 && deviceId !== "auto") {
-                    setDeviceIds([deviceId]);
-                  }
-                }}
-              />
-            </label>
-            <p className="text-[11px] text-muted-foreground/60 leading-relaxed [overflow-wrap:anywhere]">
-              {multiGpuEnabled ? t("multiGpuHintOn") : t("multiGpuHintOff")}
-            </p>
-          </div>
-        )}
-
-        {/* Feature status */}
+                {/* Feature status */}
         {/*
           自用（多卡）：每张卡的实时速度显示在这里。
           用户的要求：**单卡完全不显示**；**≥2 张才显示，用几张显示几个**（最多 3 个）。
@@ -534,32 +488,22 @@ export function GpuSettingsCard({
         */}
         <div className="flex min-w-0 flex-wrap items-start justify-between gap-3 border-border border-t pt-3">
           <div className="space-y-1.5">
-            <FeatureStatusRow active={faceGpuActive} label={t("gpuStatusFace")} />
+            {/*
+              自用（2026-10-17，用户口径）：**角色识别也吃显卡**（CCIP 走 DirectML）✓
+              这一行原来绑在人脸检测池上；人脸链路删掉后它一度被我误删，
+              现已**迁移到 CCIP**：激活/状态都看通用 DML 探测结论 ✓
+            */}
+            <FeatureStatusRow
+              active={characterGpuActive}
+              label={t("gpuStatusCharacter")}
+              statusKey={characterStatusKey}
+            />
             <FeatureStatusRow
               active={embeddingGpuActive}
               label={t("gpuStatusEmbed")}
               statusKey={embeddingStatusKey}
             />
           </div>
-          {perCardSpeeds.length > 1 && (
-            <span className="flex min-w-0 flex-col gap-1">
-              {perCardSpeeds.map((speed, index) => (
-                <span
-                  className="inline-flex w-fit items-center gap-1 rounded-[4px] border border-border bg-card px-2 py-0.5 text-[11px] text-foreground tabular-nums"
-                  key={`card-${index + 1}`}
-                >
-                  <span className="text-muted-foreground/70">
-                    {t("multiGpuCardLabel", { index: index + 1 })}
-                  </span>
-                  <span>
-                    {speed > 0
-                      ? t("multiGpuCardSpeed", { speed: speed.toFixed(1) })
-                      : t("multiGpuCardSpeedIdle")}
-                  </span>
-                </span>
-              ))}
-            </span>
-          )}
         </div>
 
         {/* Detection status */}

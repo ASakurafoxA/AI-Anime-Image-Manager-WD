@@ -9,6 +9,9 @@ import { ensureLocalModel } from "@/services/ai/model-loader";
 import {
   runWd14Tagging,
   isWd14TaggingRunning,
+  isWd14TaggingSuspended,
+  pauseWd14Tagging,
+  resumeWd14Tagging,
   cancelWd14Tagging,
   getWd14TaggingBaseline,
 } from "@/services/ai/wd14-tagger";
@@ -102,6 +105,34 @@ export const cancelAiIndexing = os.handler(async () => {
 
 export const pauseAiIndexing = os.handler(() => {
   pauseEmbedding();
+  /*
+   * 自用（2026-10）：**暂停必须主动推一条进度**。
+   * 暂停只是让循环停下，不会触发任何 ai-progress 推送 ✗ →
+   * 前端拿不到"已暂停"，就把这次任务当成结束了 → 顶栏整条消失 ✗
+   * 这里把带 isPaused 的当前进度推出去，界面才能显示"已暂停 + 继续"。
+   */
+  try {
+    const progress = getEmbeddingProgress();
+    const { BrowserWindow } = require("electron");
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) {
+        continue;
+      }
+      win.webContents.send("ai-progress", {
+        channel: "ai-progress",
+        phase: progress.phase === "idle" ? "embedding" : progress.phase,
+        processed: progress.processed,
+        total: progress.total,
+        isPaused: true,
+      });
+    }
+  } catch (error) {
+    // 推送只是"让顶栏显示已暂停"，失败也必须让暂停本身成功。
+    console.warn(
+      "[AI] Pause progress push failed:",
+      error instanceof Error ? error.message : String(error)
+    );
+  }
   return { paused: true };
 });
 
@@ -112,13 +143,42 @@ export const pauseAiIndexing = os.handler(() => {
  * 并把游标留在 `app_settings`（`wd14.tagger.cursor`）。所以这里叫「暂停」：
  * 下次点「生成 AI 标签」会**从断点继续**，已打完的照片不会重打。
  *
- * ⚠️ 两个坑（用户实测的"点继续没反应"）：
+ * 相位改成 `tagging-paused`（而不是留着 `tagging`）：否则侧边栏那一行会一直显示
+ * "正在生成 AI 标签…"，看上去像卡住了；现在会明确显示"已暂停"并给出继续入口。
+ *
+ * ⚠️ 两个坑（用户实测踩到的"点继续没反应"）：
  *  1. **不要**用 `setAiControlState("paused")`：那是**特征提取**的状态机，
  *     而打标入口 `batchGenerateTags` 的守卫是 `aiControlState !== "idle"` 就返回 `busy`
- *     —— 暂停之后点"继续"会被自己挡掉，界面毫无反应。
+ *     —— 于是暂停之后点"继续"永远被自己挡掉，界面毫无反应。
  *  2. 取消是**异步**的（循环要在批次边界退出）。必须等它真正停下来再返回，
  *     否则紧接着点"继续"仍会撞上 `isWd14TaggingRunning()` 的 busy 判断。
  */
+/**
+ * 立刻把打标相位推给所有窗口（暂停/继续时用；原来只写内存，界面要等轮询）。
+ */
+function broadcastTaggingPhase(
+  phase: "tagging" | "tagging-paused",
+  processed: number,
+  total: number
+): void {
+  try {
+    const { BrowserWindow } = require("electron");
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) {
+        continue;
+      }
+      win.webContents.send("ai-progress", {
+        phase,
+        processed,
+        total,
+        isPaused: phase === "tagging-paused",
+      });
+    }
+  } catch {
+    /* 无窗口时忽略 */
+  }
+}
+
 async function waitForTaggingToStop(timeoutMs = 8000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -134,7 +194,6 @@ export const pauseTagging = os.handler(async () => {
   if (!isWd14TaggingRunning()) {
     return { paused: false };
   }
-  cancelWd14Tagging();
   const progress = getEmbeddingProgress();
   setCurrentProgress({
     processed: progress.processed,
@@ -142,20 +201,36 @@ export const pauseTagging = os.handler(async () => {
     phase: "tagging-paused",
     currentFile: "",
   });
+  broadcastTaggingPhase("tagging-paused", progress.processed, progress.total);
   const stopped = await waitForTaggingToStop();
   return { paused: true, stopped };
 });
 
-/**
- * 自用（需求 1）：打标"运行令牌"—— 只有当前这一轮才允许写终态进度。
- * 场景：暂停 → 立刻继续 → 上一轮的循环此刻才退出，
- * 它收尾时会把进度改成"已暂停/完成"，覆盖掉新一轮的"正在生成 AI 标签"（提示一闪而过）。
- */
-let taggingRunToken = 0;
-
 export const resumeAiIndexing = os.handler(() => {
   if (!resumeEmbedding()) {
     return { resumed: false, state: aiControlState };
+  }
+  try {
+    // 自用（2026-10）：恢复时也推一条，顶栏立刻从"已暂停"回到"运行中"。
+    const progress = getEmbeddingProgress();
+    const { BrowserWindow } = require("electron");
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) {
+        continue;
+      }
+      win.webContents.send("ai-progress", {
+        channel: "ai-progress",
+        phase: progress.phase === "idle" ? "embedding" : progress.phase,
+        processed: progress.processed,
+        total: progress.total,
+        isPaused: false,
+      });
+    }
+  } catch (error) {
+    console.warn(
+      "[AI] Resume progress push failed:",
+      error instanceof Error ? error.message : String(error)
+    );
   }
   // 自用（第 10 轮·吞吐修复）：恢复建向量同样要抢显卡
   const gpuBlocked = tryAcquireGpu("embedding");
@@ -228,7 +303,26 @@ export const resetAiIndex = os.handler(async () => {
   return { success: true };
 });
 
+/**
+ * 自用（需求 1）：打标"运行令牌"。
+ *
+ * 场景（用户实测的"一闪而过"）：暂停 → 立刻点继续 → 新一轮已经开始，
+ * 但**上一轮**的循环此刻才退出，它收尾时会把进度写成"已暂停/完成"，
+ * 把新那一轮的"正在生成 AI 标签"覆盖掉 —— 看起来就是提示闪一下就没了。
+ * 有了令牌，只有"当前这一轮"才允许写终态进度。
+ */
+let taggingRunToken = 0;
+
 export const batchGenerateTags = os.handler(async () => {
+  /*
+   * 自用（2026-10-17）：**挂起中再点"继续" = 恢复**（否则会撞上后面的 busy 守卫，界面像没反应）✓
+   */
+  if (isWd14TaggingSuspended()) {
+    resumeWd14Tagging();
+    const p = getEmbeddingProgress();
+    broadcastTaggingPhase("tagging", p.processed, p.total);
+    return { resumed: true, skipped: 0, tagged: 0, total: 0 };
+  }
   if (
     aiControlState !== "idle" ||
     isAutoTaggingActive() ||
@@ -237,8 +331,9 @@ export const batchGenerateTags = os.handler(async () => {
     return { busy: true, skipped: 0, tagged: 0, total: 0 };
   }
   /**
-   * 自用（第 10 轮·吞吐修复）：打标与"建向量"共用同一块显卡，同时跑会互相拖慢。
-   * 抢不到就明确拒绝，并在进度里说明被谁挡着。
+   * 自用（第 10 轮·吞吐修复）：打标与"建向量"**共用同一块显卡**，同时跑会互相拖慢
+   * （实测打标从 1.71 张/秒掉到 1.7 以下、建向量也从 20 张/秒掉下来）。
+   * 所以这里先抢显卡：抢不到就明确拒绝，并在 `currentFile` 里说明被谁挡着。
    */
   const gpuBlocked = tryAcquireGpu("tagging");
   if (gpuBlocked) {
@@ -302,9 +397,6 @@ export const batchGenerateTags = os.handler(async () => {
         resetCursor: false,
         // 自用：界面 WD14 打标也走显卡（旧版的主力路径）
         useGpu: getSetting("gpu.enabled") === "true",
-        // 让界面这条路也尊重 设置 → GPU 加速（`gpu.enabled`）。
-        // 之前没传这个字段，`initWd14Tagger(modelsDir, Boolean(undefined))` 恒为 false，
-        // 于是界面打标是纯 CPU；WD14 worker 本身是支持 DirectML 的（["dml","cpu"] 带回退）。
         onProgress: (p) => {
           setCurrentProgress({
             processed: p.done,

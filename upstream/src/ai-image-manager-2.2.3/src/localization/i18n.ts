@@ -1024,10 +1024,6 @@ i18n.use(initReactI18next).init({
         manualRolesEmpty: "还没有手动创建的角色。",
         manualRolesPhotoCount: "{{count}} 张",
         manualRolesRename: "改名",
-        manualRolesSetCover: "设为图集封面",
-        manualRolesCoverUpdated: "已设为图集封面",
-        manualRolesBackToList: "返回角色列表",
-        manualRolesEntryHint: "点封面右上角的「展开图集」= 进入这个角色的图集",
         manualRolesExpand: "展开图集",
         manualRolesNoPhotos: "这个角色下暂时没有照片。",
         manualRolesRenameSave: "保存",
@@ -1067,6 +1063,8 @@ i18n.use(initReactI18next).init({
         noResults: "无结果",
         settingsDependencies: "开源依赖",
         settingsIndexing: "索引",
+  settingsSemanticIndexHint:
+    "语义搜索/以图搜图依赖向量索引。没建过或换过模型时，点下面的「重建向量索引」。",
         settingsThumbnailCache: "缩略图缓存",
         settingsThumbnailCacheHint:
           "用于快速显示图片预览；同一图片可能因不同尺寸或对比预览占用多个文件。清除后浏览图片时会按需重新生成。",
@@ -1602,6 +1600,9 @@ i18n.use(initReactI18next).init({
         aiMirrorSettingsHint: "或在下方「AI 镜像设置」中配置",
         aiRetry: "重试",
         aiStartIndex: "开始 AI 索引",
+  aiRebuildIndex: "重建向量索引",
+  aiRebuildIndexHint:
+    "向量库与当前嵌入模型不兼容（换过模型或旧版本建的索引）。会清空已建向量与「已处理」标记后从头重建，不会动照片和标签。",
         aiIndexComplete: "AI 索引完成 ({{processed}}/{{total}})",
         aiIndexNewPhotos: "索引新图像",
         aiLoadingEmbedding: "正在加载动漫识别模型... {{percent}}%",
@@ -1662,7 +1663,6 @@ i18n.use(initReactI18next).init({
         gpuDetectedError: "检测失败",
         gpuNotDetected: '未检测 — 点击"检测 GPU"',
         gpuStatusEmbed: "图像嵌入（语义搜索 / 以图搜图）",
-        gpuStatusNotProbed: "还没检测过（点「重新检测」测一次）",
         gpuStatusCharacter: "角色识别（CCIP）",
         gpuStatusActive: "GPU 加速中",
         gpuStatusInactive: "未加速",
@@ -1764,20 +1764,23 @@ i18n.use(initReactI18next).init({
         characterDiscoveryApply: "命名",
         peopleFindUnnamedCharactersHint:
           "拿库里已有的角色标签当种子，找出「很像这个角色、但没打这个标签」的图，逐行确认后补成 AI 建议标签（不覆盖已有标签）",
-        characterFeatureModelMissingShort: "未检测到 CCIP 模型，角色识别暂不可用",
-  characterFeatureVectorsMissingShort: "还没算过角色特征：点右上角「获取全库角色特征」",
-  characterFeatureVectorDbNotReadyShort: "向量库正在加载，稍等几秒…",
+        characterSuggestProgressSeeds: "正在读取已命名图片的特征 {{done}}/{{total}}",
+        characterSuggestProgressSearch: "正在逐个角色比对 {{done}}/{{total}}",
+        characterSuggestProgressElapsed: "已用 {{seconds}} 秒",
         characterFeatureModelMissing:
           "角色识别默认用 CCIP 模型，但没检测到模型文件。请把模型放到「图库\\models\\ccip\\model_feat.onnx」；或者到「设置 → 应用行为」关掉「角色识别优先使用 CCIP」（关掉即视为已知情，此时角色特征会复用文字搜图的 CLIP 模型）",
+        characterFeatureModelMissingShort: "未检测到 CCIP 模型，角色识别暂不可用",
         characterFeatureGoSettings: "去设置",
+        gpuStatusNotProbed: "还没检测过（点「重新检测」测一次）",
+        manualRolesBackToList: "返回角色列表",
+        manualRolesEntryHint: "点封面右上角的「展开图集」= 进入这个角色的图集",
+        manualRolesSetCover: "设为图集封面",
+        manualRolesCoverUpdated: "已设为图集封面",
         peopleTaggingGateHint:
           "全库打标完成后才能用（还剩 {{count}} 张未打标）",
         peopleModelCcip: "当前使用 CCIP 模型",
         peopleModelClip: "当前使用 CLIP 特征",
         peopleFindUnnamedCharactersBusy: "分析中…",
-        characterSuggestProgressSeeds: "正在读取已命名图片的特征 {{done}}/{{total}}",
-        characterSuggestProgressSearch: "正在逐个角色比对 {{done}}/{{total}}",
-        characterSuggestProgressElapsed: "已用 {{seconds}} 秒",
         peopleFindUnnamedCharactersDone:
           "已为 {{count}} 张图生成角色建议（涉及 {{characters}} 个角色），请到图片详情里确认",
         peopleFindUnnamedCharactersNone:
@@ -3582,11 +3585,6 @@ i18n.use(initReactI18next).init({
         manualRolesPhotoCount: "{{count}} images",
         manualRolesRename: "Rename",
         manualRolesExpand: "Expand gallery",
-        manualRolesBackToList: "Back to roles",
-        manualRolesSetCover: "Set as album cover",
-        manualRolesCoverUpdated: "Album cover updated",
-        manualRolesEntryHint:
-          "Click “Expand gallery” on a cover to open that character’s album",
         manualRolesNoPhotos: "No images under this role yet.",
         manualRolesRenameSave: "Save",
         manualRolesRenameCancel: "Cancel",
@@ -4204,6 +4202,9 @@ i18n.use(initReactI18next).init({
         aiMirrorSettingsHint: 'Or configure in "AI Mirror Settings" below',
         aiRetry: "Retry",
         aiStartIndex: "Start AI Indexing",
+  aiRebuildIndex: "Rebuild vector index",
+  aiRebuildIndexHint:
+    "The vector store was built with a different embedding model. This clears vectors and processed flags, then rebuilds; photos and tags are untouched.",
         aiIndexComplete: "AI index complete ({{processed}}/{{total}})",
         aiIndexNewPhotos: "Index New Images",
         aiLoadingEmbedding: "Loading anime recognition model... {{percent}}%",
@@ -4267,7 +4268,6 @@ i18n.use(initReactI18next).init({
         gpuDetectedError: "Detection failed",
         gpuNotDetected: 'Not detected — click "Detect GPU"',
         gpuStatusEmbed: "Image embedding (semantic & image search)",
-        gpuStatusNotProbed: "Not probed yet (run “Detect again”)",
         gpuStatusCharacter: "Character recognition (CCIP)",
         gpuStatusActive: "GPU accelerated",
         gpuStatusInactive: "Not accelerated",
@@ -4377,24 +4377,26 @@ i18n.use(initReactI18next).init({
         characterDiscoveryApply: "Name",
         peopleFindUnnamedCharactersHint:
           "Uses your existing character tags as seeds: finds photos that look like that character but lack the tag, then lets you confirm row by row (existing tags are never overwritten)",
-        characterFeatureModelMissingShort:
-          "CCIP model not found — character recognition is unavailable",
-        characterFeatureVectorsMissingShort:
-          "No character features yet: click “Build all character features” (top right)",
-        characterFeatureVectorDbNotReadyShort:
-          "Vector store is still loading, please wait…",
+        characterSuggestProgressSeeds:
+          "Loading features of named images {{done}}/{{total}}",
+        characterSuggestProgressSearch: "Comparing characters {{done}}/{{total}}",
+        characterSuggestProgressElapsed: "{{seconds}}s elapsed",
         characterFeatureModelMissing:
           "Character recognition uses the CCIP model by default, but no model file was found. Put the model at “<library>\\models\\ccip\\model_feat.onnx”, or turn off “Prefer the CCIP model” in Settings → Behavior (turning it off means you accept the fallback, and character features reuse the CLIP model used for text search)",
+        characterFeatureModelMissingShort:
+          "CCIP model not found — character recognition is unavailable",
         characterFeatureGoSettings: "Open settings",
+        gpuStatusNotProbed: "Not probed yet (run “Detect again”)",
+        manualRolesBackToList: "Back to roles",
+        manualRolesEntryHint:
+          "Click “Expand gallery” on a cover to open that character’s album",
+        manualRolesSetCover: "Set as album cover",
+        manualRolesCoverUpdated: "Album cover updated",
         peopleTaggingGateHint:
           "Available after tagging finishes for the whole library ({{count}} untagged)",
         peopleModelCcip: "Currently using the CCIP model",
         peopleModelClip: "Currently using CLIP features",
         peopleFindUnnamedCharactersBusy: "Analyzing…",
-        characterSuggestProgressSeeds:
-          "Loading features of named images {{done}}/{{total}}",
-        characterSuggestProgressSearch: "Comparing characters {{done}}/{{total}}",
-        characterSuggestProgressElapsed: "{{seconds}}s elapsed",
         peopleFindUnnamedCharactersDone:
           "Created character suggestions for {{count}} photo(s) across {{characters}} character(s). Confirm them from the photo details.",
         peopleFindUnnamedCharactersNone:
