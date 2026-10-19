@@ -177,7 +177,7 @@ git apply --whitespace=nowarn ../patches/lan.patch
 | **安装包（三个版本的 MSI）** | <https://pan.baidu.com/s/1jDBvv4tL9v5_BgYhRDJcGQ?pwd=6666>　提取码：`6666` |
 | 模型（WD14 打标）| https://huggingface.co/SmilingWolf/wd-vit-tagger-v3 |
 | 模型（中文 CLIP 语义搜索，**已随安装包提供**）| https://huggingface.co/Xenova/chinese-clip-vit-base-patch16 |
-| 模型（CCIP 角色识别，可选）| https://huggingface.co/deepghs/ccip_onnx |
+| **CCIP 角色识别模型**（三版共用，339 MB） | <https://pan.baidu.com/s/1ZBRJIwIB7g1vuiTfoed4fA?pwd=6666> 提取码 `6666`；放法见 [CCIP模型安装说明.md](CCIP模型安装说明.md) |
 
 > ⚠️ **版本号仍是 2.2.3**：如果你装过同一版本的旧安装包，请**先卸载旧的、再装新的**（卸载不会删图库和设置）。
 
