@@ -24,7 +24,7 @@ import {
 const MAX_DIAGNOSTIC_LOG_BYTES = 2 * 1024 * 1024;
 const PROBE_TIMEOUT_MS = 1500;
 const GITHUB_ISSUES_URL =
-  "https://github.com/ASakurafoxA/AI-Anime-Image-Manager-LAN/issues/new";
+  "https://github.com/ASakurafoxA/AI-Anime-Image-Manager-NEXT/issues/new";
 const LINE_BREAK_PATTERN = /\r?\n/;
 const MAX_ISSUE_URL_CHARS = 7500;
 
@@ -121,8 +121,7 @@ export async function createDiagnosticBundle(
 export async function assembleDiagnosticEntries(
   incident: StoredDiagnosticIncident,
   input: DiagnosticBundleInput
-): Promise<BundleEntries> {
-  const sanitizer = new DiagnosticSanitizer();
+): Promise<BundleEntries> {  const sanitizer = new DiagnosticSanitizer();
   const warnings: string[] = [];
   const forbiddenValues = getForbiddenValues();
   const manifest = await collectManifest(incident, warnings);

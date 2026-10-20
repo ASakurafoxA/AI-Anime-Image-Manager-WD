@@ -216,7 +216,7 @@ describe("WhatsNewPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "whatsNewGithub" }));
     expect(mocks.openExternalLink).toHaveBeenCalledWith(
-      "https://github.com/ASakurafoxA/AI-Anime-Image-Manager-LAN"
+      "https://github.com/ASakurafoxA/AI-Anime-Image-Manager-NEXT"
     );
   });
 });

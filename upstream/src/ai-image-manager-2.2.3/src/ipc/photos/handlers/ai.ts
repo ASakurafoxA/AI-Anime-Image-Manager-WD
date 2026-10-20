@@ -1,5 +1,6 @@
 import { os } from "@orpc/server";
 import { eq } from "drizzle-orm";
+import { BrowserWindow } from "electron";
 import { getDatabase } from "@/db";
 import { photos } from "@/db/schema";
 import { PRIVATE_BUILD } from "@/config/private-build";
@@ -37,21 +38,52 @@ import {
   stopEmbedding,
 } from "@/services/ai-embedder";
 
-export const startAiIndexing = os.handler(() => {
+export const startAiIndexing = os.handler(async () => {
   if (aiControlState !== "idle") {
     return { busy: true, started: false, state: aiControlState };
   }
   /**
    * 自用（第 10 轮·吞吐修复）：建向量与打标**共用同一块显卡**，同时跑会互相拖慢。
-   * 抢不到就明确拒绝（不排队），避免"两边都慢"却看不出原因。
+   *
+   * 2026-10-20（会话#10）：打标在跑时点「开始/重建 AI 索引」必须能把显卡抢回来。
+   * 原来只 `cancelWd14Tagging()` 后空等；现在明确：取消 → 等它退出 → 交还令牌 →
+   * 顶栏显示"已暂停"（与 NEXT 同一套做法）。
    */
   const gpuBlocked = tryAcquireGpu("embedding");
   if (gpuBlocked) {
-    console.warn(`[AI] 建向量未启动：${gpuBlocked}`);
-    return { busy: true, started: false, reason: gpuBlocked };
+    console.warn(`[AI] 建向量抢占显卡：${gpuBlocked}`);
+    if (isWd14TaggingRunning()) {
+      cancelWd14Tagging();
+      const deadline = Date.now() + 15_000;
+      while (isWd14TaggingRunning() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      releaseGpu("tagging");
+      const tagProgress = getEmbeddingProgress();
+      setCurrentProgress({
+        processed: tagProgress.processed,
+        total: tagProgress.total,
+        phase: "tagging-paused",
+        currentFile: "",
+      });
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (win.isDestroyed()) {
+          continue;
+        }
+        win.webContents.send("ai-progress", {
+          phase: "tagging-paused",
+          processed: tagProgress.processed,
+          total: tagProgress.total,
+          isPaused: true,
+        });
+      }
+    }
+    const retryBlocked = tryAcquireGpu("embedding");
+    if (retryBlocked) {
+      return { busy: true, started: false, reason: retryBlocked };
+    }
   }
   embedAllPhotos((aiProgress) => {
-    const { BrowserWindow } = require("electron");
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send("ai-progress", aiProgress);
     }
@@ -104,6 +136,33 @@ export const cancelAiIndexing = os.handler(async () => {
 });
 
 export const pauseAiIndexing = os.handler(() => {
+  /*
+   * 2026-10-20（会话#10）：**没在跑就别把界面钉在"已暂停"**。
+   * 原来无条件推一条 isPaused=true（phase 为 idle 时还会改成 embedding）——
+   * 如果这一刻其实没有建向量在跑，顶栏就会一直显示"已暂停 + 继续"而点继续无效。
+   */
+  if (aiControlState === "idle") {
+    setCurrentProgress({
+      processed: 0,
+      total: 0,
+      phase: "idle",
+      currentFile: "",
+      downloadPercent: undefined,
+    });
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) {
+        continue;
+      }
+      win.webContents.send("ai-progress", {
+        channel: "ai-progress",
+        phase: "idle",
+        processed: 0,
+        total: 0,
+        isPaused: false,
+      });
+    }
+    return { paused: false };
+  }
   pauseEmbedding();
   /*
    * 自用（2026-10）：**暂停必须主动推一条进度**。
@@ -113,14 +172,21 @@ export const pauseAiIndexing = os.handler(() => {
    */
   try {
     const progress = getEmbeddingProgress();
-    const { BrowserWindow } = require("electron");
+    const phase = progress.phase === "idle" ? "embedding" : progress.phase;
+    setCurrentProgress({
+      processed: progress.processed,
+      total: progress.total,
+      phase,
+      currentFile: progress.currentFile ?? "",
+      isPaused: true,
+    });
     for (const win of BrowserWindow.getAllWindows()) {
       if (win.isDestroyed()) {
         continue;
       }
       win.webContents.send("ai-progress", {
         channel: "ai-progress",
-        phase: progress.phase === "idle" ? "embedding" : progress.phase,
+        phase,
         processed: progress.processed,
         total: progress.total,
         isPaused: true,
@@ -179,19 +245,52 @@ function broadcastTaggingPhase(
   }
 }
 
-async function waitForTaggingToStop(timeoutMs = 8000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!isWd14TaggingRunning()) {
-      return true;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  return false;
+/**
+ * 自用（2026-10-20 · 会话#10）：**"运行中 / 已挂起"只认挂起标志**。
+ * 在途批次收尾时照旧会回调一次进度；如果那次回调把相位翻回"运行中"，
+ * 界面就会从"已暂停"跳回"进行中"、暂停键重新出现（用户看到"暂停了又继续"）。
+ */
+function taggingPhaseNow(): "tagging" | "tagging-paused" {
+  return isWd14TaggingSuspended() ? "tagging-paused" : "tagging";
 }
 
 export const pauseTagging = os.handler(async () => {
-  if (!isWd14TaggingRunning()) {
+  const wd14Running = isWd14TaggingRunning();
+  if (!wd14Running) {
+    /*
+     * 自用（2026-10-20 · 会话#10）：**启动窗口期的暂停不能丢**。
+     * 点「生成 AI 标签」后要加载模型（十几秒），这段时间循环还没开始、
+     * `isWd14TaggingRunning()` 还是 false —— 老代码直接返回 paused:false，
+     * 模型一加载完就从头打到尾。现在只要这一轮任务还在 batchGenerateTags 里，
+     * 就先把挂起标志立起来，循环到第一个批边界就停。
+     */
+    if (taggingJobInFlight) {
+      pauseWd14Tagging();
+      const starting = getEmbeddingProgress();
+      setCurrentProgress({
+        processed: starting.processed,
+        total: starting.total,
+        phase: "tagging-paused",
+        currentFile: "",
+      });
+      broadcastTaggingPhase(
+        "tagging-paused",
+        starting.processed,
+        starting.total
+      );
+      return { paused: true, suspended: true, starting: true };
+    }
+    // 没在跑、但界面还停在"正在生成 AI 标签"时，点暂停也要有反馈
+    const stale = getEmbeddingProgress();
+    if (stale.phase === "tagging" || stale.phase === "tagging-paused") {
+      setCurrentProgress({
+        processed: stale.processed,
+        total: stale.total,
+        phase: "tagging-paused",
+        currentFile: "",
+      });
+      return { paused: true, alreadyStopped: true };
+    }
     return { paused: false };
   }
   const progress = getEmbeddingProgress();
@@ -201,19 +300,29 @@ export const pauseTagging = os.handler(async () => {
     phase: "tagging-paused",
     currentFile: "",
   });
+  // 立刻推一条，别让界面等轮询
   broadcastTaggingPhase("tagging-paused", progress.processed, progress.total);
-  const stopped = await waitForTaggingToStop();
-  return { paused: true, stopped };
+  // 挂起：循环在批边界原地等，worker 不销毁、模型保持热态 → 继续是秒接
+  pauseWd14Tagging();
+  return { paused: true, suspended: true };
 });
 
-export const resumeAiIndexing = os.handler(() => {
+export const resumeAiIndexing = os.handler(async () => {
+  /*
+   * 2026-10-20（会话#10）：**暂停是异步的**（循环要在批边界退出、收尾后才落到 `paused`），
+   * 但界面在点暂停的瞬间就显示「继续」。用户很可能在 `pausing` 阶段点到它 ——
+   * 老代码直接 `resumeEmbedding()` 返回 false，界面毫无反应。这里最多等 10 秒。
+   */
+  const deadline = Date.now() + 10_000;
+  while (aiControlState === "pausing" && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   if (!resumeEmbedding()) {
     return { resumed: false, state: aiControlState };
   }
   try {
     // 自用（2026-10）：恢复时也推一条，顶栏立刻从"已暂停"回到"运行中"。
     const progress = getEmbeddingProgress();
-    const { BrowserWindow } = require("electron");
     for (const win of BrowserWindow.getAllWindows()) {
       if (win.isDestroyed()) {
         continue;
@@ -240,7 +349,6 @@ export const resumeAiIndexing = os.handler(() => {
   }
   // Fire-and-forget: restart embedding
   embedAllPhotos((aiProgress) => {
-    const { BrowserWindow } = require("electron");
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send("ai-progress", aiProgress);
     }
@@ -258,7 +366,15 @@ export const resumeAiIndexing = os.handler(() => {
 });
 
 export const getAiProgress = os.handler(() => {
-  return getEmbeddingProgress();
+  const progress = getEmbeddingProgress();
+  /*
+   * 自用（2026-10-20 · 会话#10）：挂起期间，**轮询也必须看到"已暂停"**。
+   * 界面每秒拉一次这个接口；如果它拿到的还是 "tagging"，暂停键会重新出现。
+   */
+  if (progress.phase === "tagging" && isWd14TaggingSuspended()) {
+    return { ...progress, phase: "tagging-paused" as const, isPaused: true };
+  }
+  return progress;
 });
 
 export const getAiStatus = os.handler(() => {
@@ -313,6 +429,12 @@ export const resetAiIndex = os.handler(async () => {
  */
 let taggingRunToken = 0;
 
+/**
+ * 自用（2026-10-20 · 会话#10）：**这一轮打标任务是否还在 `batchGenerateTags` 里**
+ *（从点按钮到循环真正结束，包含加载模型那十几秒）。`pauseTagging` 靠它识别启动窗口期。
+ */
+let taggingJobInFlight = false;
+
 export const batchGenerateTags = os.handler(async () => {
   /*
    * 自用（2026-10-17）：**挂起中再点"继续" = 恢复**（否则会撞上后面的 busy 守卫，界面像没反应）✓
@@ -326,10 +448,29 @@ export const batchGenerateTags = os.handler(async () => {
   if (
     aiControlState !== "idle" ||
     isAutoTaggingActive() ||
-    isWd14TaggingRunning()
+    isWd14TaggingRunning() ||
+    // 还在启动（模型没加载完）：第二次点击直接 busy，否则会并发两轮
+    taggingJobInFlight
   ) {
     return { busy: true, skipped: 0, tagged: 0, total: 0 };
   }
+  taggingJobInFlight = true;
+  try {
+    return await startTaggingJob();
+  } finally {
+    taggingJobInFlight = false;
+    /*
+     * 启动阶段失败/被显卡挡住时，别把"挂起"留给下一次运行
+     *（否则下一次点按钮会被当成"继续"，什么都不做）。
+     */
+    if (!isWd14TaggingRunning()) {
+      resumeWd14Tagging();
+    }
+  }
+});
+
+/** 真正跑一轮打标（主体拆出来，只为把"启动窗口期"包进 try/finally）。 */
+async function startTaggingJob() {
   /**
    * 自用（第 10 轮·吞吐修复）：打标与"建向量"**共用同一块显卡**，同时跑会互相拖慢
    * （实测打标从 1.71 张/秒掉到 1.7 以下、建向量也从 20 张/秒掉下来）。
@@ -344,7 +485,7 @@ export const batchGenerateTags = os.handler(async () => {
       phase: "tagging",
       currentFile: gpuBlocked,
     });
-    for (const win of require("electron").BrowserWindow.getAllWindows()) {
+    for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send("ai-progress", getEmbeddingProgress());
     }
     return { busy: true, skipped: 0, tagged: 0, total: 0 };
@@ -364,7 +505,6 @@ export const batchGenerateTags = os.handler(async () => {
     return { tagged: 0, skipped: 0, total: 0 };
   }
 
-  const { BrowserWindow } = require("electron");
   const broadcastProgress = () => {
     const progress = getEmbeddingProgress();
     for (const win of BrowserWindow.getAllWindows()) {
@@ -377,7 +517,8 @@ export const batchGenerateTags = os.handler(async () => {
   setCurrentProgress({
     processed: tagBaseline.done,
     total: tagBaseline.total,
-    phase: "tagging",
+    // 启动窗口期可能已经被"暂停"预定过了（见 pauseTagging），别把相位翻回运行中
+    phase: taggingPhaseNow(),
     currentFile: "",
   });
   broadcastProgress();
@@ -401,19 +542,23 @@ export const batchGenerateTags = os.handler(async () => {
           setCurrentProgress({
             processed: p.done,
             total: p.total,
-            phase: "tagging",
+            // 暂停是"批边界才停"：在途批次收尾时可能还会回调一次，
+            // 这里按挂起标志写相位，界面才不会从"已暂停"跳回"进行中"（会话#10）
+            phase: taggingPhaseNow(),
             currentFile: "",
           });
           broadcastProgress();
         },
       });
       if (isCurrentRun()) {
+        // 暂停时的最后一次进度：保留"上次报过的已完成张数"（别用 total，会显示 100%）
+        const lastTagProgress = getEmbeddingProgress();
         setCurrentProgress(
           result.cancelled
             ? // 被暂停：保留"已暂停"相位（见 pauseTagging 的说明）
               {
-                processed: result.total,
-                total: result.total,
+                processed: lastTagProgress.processed,
+                total: lastTagProgress.total,
                 phase: "tagging-paused",
                 currentFile: "",
               }
@@ -472,4 +617,4 @@ export const batchGenerateTags = os.handler(async () => {
       win.webContents.send("ai-tags-done");
     }
   }
-});
+}

@@ -47,7 +47,7 @@ describe("GpuSettingsCard", () => {
       expect(onLoaded).toHaveBeenCalledOnce();
     });
     expect(onEnabledChange).toHaveBeenCalledWith(false);
-    expect(screen.queryByText("保存")).not.toBeInTheDocument();
+    expect(screen.queryByText("淇濆瓨")).not.toBeInTheDocument();
   });
 
   it("reports detection work and the enabled state to the onboarding parent", async () => {
@@ -101,6 +101,12 @@ describe("GpuSettingsCard", () => {
     });
   });
 
+  /*
+   * 自用（2026-10-17，用户口径）：「**角色识别是需要 GPU 的**」——
+   * 这一行从人脸检测池**迁移到 CCIP**：判据是通用 DML 探测结论 `dmlAvailable` ✓
+   * 下面这条只给 `dmlAvailable: true`（**不给** embeddingDmlAvailable），
+   * 能出现「GPU 加速中」就说明「角色识别」那行确实是靠 dmlAvailable 亮起来的 ✓
+   */
   it("shows the detected real GPU name without changing DirectML status", async () => {
     vi.mocked(ipc.client.settings.getGpuSettings).mockResolvedValue({
       detected: {
@@ -124,6 +130,9 @@ describe("GpuSettingsCard", () => {
         screen.getByText("NVIDIA GeForce RTX 4060 Laptop GPU")
       ).toBeInTheDocument();
     });
+    // 两个状态行都在：角色识别（CCIP）+ 图像嵌入
+    expect(screen.getByText("gpuStatusCharacter")).toBeInTheDocument();
+    expect(screen.getByText("gpuStatusEmbed")).toBeInTheDocument();
     expect(screen.getByText("gpuStatusActive")).toBeInTheDocument();
   });
 
@@ -152,63 +161,18 @@ describe("GpuSettingsCard", () => {
     expect(screen.queryByText("gpuStatusActive")).not.toBeInTheDocument();
   });
 
-  // 自用新增：手动选显卡 + AI 占用限制要能存下来
-  it("lists usable adapters and saves the manual pick", async () => {
-    vi.mocked(ipc.client.settings.getGpuSettings).mockResolvedValue({
-      detected: {
-        adapters: [
-          { deviceId: 0, name: "Intel(R) UHD Graphics", ok: true },
-          { deviceId: 1, name: "NVIDIA GeForce RTX 4060 Laptop GPU", ok: true },
-          { deviceId: 2, name: null, ok: false },
-        ],
-        dmlAvailable: true,
-        gpuName: "NVIDIA GeForce RTX 4060 Laptop GPU",
-        probeTimeMs: 30,
-      },
-      deviceId: "auto",
-      enabled: true,
-      promptShown: true,
-      searchImageSource: "thumbnail",
-      deviceIds: [],
-      multiGpuEnabled: false,
-      effectiveDevices: [],
-    });
-    vi.mocked(ipc.client.settings.setGpuSettings).mockResolvedValue({
-      ok: true,
-    });
-
-    render(<GpuSettingsCard />);
-
-    const select = await screen.findByLabelText("gpuAdapterTitle");
-    // 自用（问题 5）：改用应用自己的下拉（FilterDropdown），选项要点开才渲染。
-    fireEvent.click(select);
-    // 只有可用的适配器进下拉框
-    fireEvent.click(
-      await screen.findByRole("option", {
-        name: "NVIDIA GeForce RTX 4060 Laptop GPU",
-      })
-    );
-    expect(screen.queryByText("gpuAdapterIndex")).not.toBeInTheDocument();
-
-    // 保存按钮是逐字动画，按文字取不到，用角色 + 名字取（测试环境里该键有真实译文）。
-    fireEvent.click(screen.getByRole("button", { name: /保存|save/i }));
-
-    await waitFor(() => {
-      expect(ipc.client.settings.setGpuSettings).toHaveBeenCalledWith({
-        deviceId: "1",
-        enabled: true,
-        searchImageSource: "thumbnail",
-        deviceIds: [],
-        multiGpuEnabled: false,
-      });
-    });
-  });
-  it("saves the feature source with the multi-GPU fields", async () => {
+  /**
+   * ⚠️ 原「AI 占用限制」滑块已按用户要求**整体删除**（PWM 式限速对偶发高负载没用），
+   * 所以这条测试只再校验"特征来源"与多卡字段是否随保存一起发出。
+   */
+  it("saves the feature source together with the multi-GPU fields", async () => {
     render(<GpuSettingsCard />);
 
     // 默认缩略图（快）：下拉框有选项可开
     const sourceSelect = await screen.findByLabelText("searchImageSourceTitle");
     expect(sourceSelect).toBeInTheDocument();
+    // 滑块应当**不存在**了
+    expect(screen.queryByLabelText("throttleTitle")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
@@ -242,6 +206,37 @@ describe("GpuSettingsCard", () => {
       });
     });
   });
+
+  /**
+   * 回归：诊断探针偶发失败（显卡被别的任务占满）时，缓存里的 `adapters` 会变空，
+   * 原来「使用显卡」+ 多卡开关会因为 `usableAdapters.length > 0` 不成立而**整段消失**
+   * （用户截图就是这个）。现在只要还记得显卡名字，这一块就要显示出来。
+   */
+  it("keeps the adapter and multi-GPU controls when a failed probe wiped the adapter list", async () => {
+    vi.mocked(ipc.client.settings.getGpuSettings).mockResolvedValue({
+      detected: {
+        dmlAvailable: false,
+        embeddingDmlAvailable: false,
+        embeddingError: "Probe worker exited unexpectedly",
+        gpuName: "NVIDIA GeForce RTX 4070 Ti SUPER",
+        probeTimeMs: 1637,
+      },
+      deviceId: "auto",
+      deviceIds: [],
+      effectiveDevices: [2],
+      enabled: true,
+      multiGpuEnabled: false,
+      promptShown: true,
+      searchImageSource: "thumbnail",
+    });
+
+    render(<GpuSettingsCard />);
+
+    // 两块都必须还在
+    expect(await screen.findByLabelText("gpuAdapterTitle")).toBeInTheDocument();
+    expect(screen.getByLabelText("multiGpuTitle")).toBeInTheDocument();
+  });
+
   /**
    * 用户明确要求：**只用 1 张卡时完全不显示每卡速度**（顶上已有总速度，重复没意义）。
    */
@@ -263,7 +258,8 @@ describe("GpuSettingsCard", () => {
     render(<GpuSettingsCard />);
 
     // 等状态行渲染出来（说明轮询也回来了）
-    expect(await screen.findByText("gpuStatusFace")).toBeInTheDocument();
+    // 自用（2026-10-17）：「角色识别」那行随 SFace 链路删掉了 → 只剩「图像嵌入」这行 ✓
+    expect(await screen.findByText("gpuStatusEmbed")).toBeInTheDocument();
     await waitFor(() => {
       expect(ipc.client.settings.getGpuSpeeds).toHaveBeenCalled();
     });

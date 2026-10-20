@@ -102,6 +102,7 @@ export function forgetRemovedPath(folderPath: string): string[] {
   return setRemovedFolderPaths(remaining);
 }
 
+
 /** 读取全部已索引文件夹的层级 + 路径信息。 */
 export function getAllFolderPathItems(): FolderPathItem[] {
   return getDatabase()

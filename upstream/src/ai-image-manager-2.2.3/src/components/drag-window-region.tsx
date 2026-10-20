@@ -90,12 +90,13 @@ export default function DragWindowRegion({
       >
         {title && !isMacOS && (
           <div className="flex min-w-0 flex-1 select-none items-center gap-1.5 whitespace-nowrap p-2 text-muted-foreground text-xs">
+            {/* 自用（2026-10-18）：用户反馈"软件里的再大点" → 标题栏图标 14 → 18px ✓ */}
             <img
               alt=""
-              className="h-3.5 w-3.5"
-              height={14}
+              className="h-[18px] w-[18px]"
+              height={18}
               src={icon}
-              width={14}
+              width={18}
             />
             <span className="min-w-0 truncate">{title}</span>
           </div>

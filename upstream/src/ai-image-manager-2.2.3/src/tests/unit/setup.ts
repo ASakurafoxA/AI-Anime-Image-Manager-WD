@@ -97,17 +97,17 @@ vi.mock("react-i18next", () => ({
         photosSelected: " · {{count}} 张已选",
         scanningComplete: "扫描完成，共索引 {{count}} 张图片",
         scanningSkipped:
-          "扫描完成，共索引 {{count}} 张图片，{{skipped}} 个文件被跳过（非有效图片）",
+          "扫描完成，共索引 {{count}} 张照片，{{skipped}} 个文件被跳过（非有效图片）",
         scanningPath: "路径: {{path}}",
         noPhotos: "还没有图片，请先添加文件夹",
         emptyWelcomeTitle: "添加图片文件夹开始整理",
         emptyWelcomeDescription: "选择包含图片的文件夹。所有处理都在本地完成。",
         emptyImportingTitle: "正在导入图片",
         emptyImportingDescription:
-          "正在扫描文件夹并生成缩略图，图片很快会出现在这里。",
+          "正在扫描文件夹并生成缩略图，照片很快会出现在这里。",
         emptyScopeTitle: "当前范围内没有图片",
         emptyScopeDescription:
-          "此文件夹或标签组合暂时没有可显示的图片，可以返回浏览全部图片。",
+          "此文件夹或标签组合暂时没有可显示的照片，可以返回浏览全部照片。",
         cullRequiresTwoPhotos: "至少选择 2 张图片才能开始选片",
         photoDetail: "图片详情",
         photoInfo: "基本信息",
@@ -176,7 +176,7 @@ vi.mock("react-i18next", () => ({
         toastFavoriteAddedCount: "已收藏 {{count}} 张",
         toastPhotosIndexed: "已索引 {{count}} 张图片",
         toastPhotosIndexedSkipped:
-          "已索引 {{count}} 张图片，跳过 {{skipped}} 张",
+          "已索引 {{count}} 张照片，跳过 {{skipped}} 张",
         toastImportQueued: "已加入后台导入队列，请留意顶部状态栏",
         toastFolderSelectionFailed: "无法打开文件夹选择器，请重试",
         toastImportQueuedRefreshFailed: "已加入导入队列但列表刷新失败",
@@ -207,7 +207,7 @@ vi.mock("react-i18next", () => ({
         emptySearchDescription: "试试换个关键词，或使用 EXIF 筛选器缩小范围",
         emptyFavoritesTitle: "还没有收藏的图片",
         emptyFavoritesDescription:
-          "浏览图片时点击星标即可收藏，收藏的图片会出现在这里",
+          "浏览照片时点击星标即可收藏，收藏的照片会出现在这里",
         emptyBrowseAll: "浏览全部图片",
         emptyGoToAiSettings: "前往 AI 设置",
         emptyAiPartialTitle: "AI 索引尚未完成（{{indexed}} / {{total}}）",
@@ -230,7 +230,7 @@ vi.mock("react-i18next", () => ({
         confirmDeleteTitle: "确认删除",
         confirmDeleteAction: "删除",
         confirmDeleteDescription:
-          "将{{target}}移入本应用的“最近删除”。原文件暂不移动，可在 30 天内从应用中恢复；这不是仅从当前相册移除。其他相册和标签关系不会被改写，图片在最近删除期间会从图库视图隐藏。",
+          "将{{target}}移入本应用的“最近删除”。原文件暂不移动，可在 30 天内从应用中恢复；这不是仅从当前相册移除。其他相册和标签关系不会被改写，照片在最近删除期间会从图库视图隐藏。",
         confirmDeleteTargetPhoto: "该图片",
         confirmDeleteTargetPhotos: " {{count}} 张图片",
         done: "完成",

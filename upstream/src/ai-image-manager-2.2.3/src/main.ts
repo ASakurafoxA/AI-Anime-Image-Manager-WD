@@ -36,12 +36,9 @@ import {
   onMainLocaleChanged,
   syncLegacyRendererLocale,
 } from "@/localization/main-runtime";
-import { getActiveFaceModel } from "@/services/ai/face-model-config";
-import {
-  getEmbeddingModelFile,
-  getTranslationModelFile,
-} from "@/services/ai/model-config";
+import { getEmbeddingModelFile } from "@/services/ai/model-config";
 import { copyModelsOnce } from "@/services/ai/model-loader";
+import { releaseGpu, tryAcquireGpu } from "@/services/ai/gpu-queue";
 import { deletePhotoVectors, initVectorDB } from "@/services/ai-embedder";
 import {
   appendDiagnosticLog,
@@ -52,8 +49,6 @@ import {
   DiagnosticSanitizer,
   sanitizeRendererRoute,
 } from "@/services/diagnostics/sanitizer";
-import { cancelFaceDetection } from "@/services/face-detector";
-import { shutdownFacePool } from "@/services/face-worker-pool";
 import {
   getHttpServerAuthToken,
   getHttpServerPort,
@@ -150,9 +145,11 @@ if (devUserDataDir) {
 
 // 改名（2026-10 加了 "LAN" 后缀）**不能**换数据目录。
 // app.getPath("userData") 默认跟着 package.json 的 productName 走，改名的瞬间
-// 它就会变成 ...\APPDATA\AI Anime Image Manager LAN —— 而用户的图库位置
+// 它就会变成 ...\APPDATA\AI Anime Image Manager NEXT —— 而用户的图库位置
 // （app-config.json）、标签与局域网口令哈希都在旧目录里，那样会看起来"全丢了"。
 // 所以这里显式钉死旧目录；两个环境变量（E2E / 隔离验证）仍然优先。
+// ⚠️ 2026-10-18（会话#9）用户口径：**只需要和上游原版不同**（上游叫 AI Image Manager，
+//    配置目录本来就是分开的），**自家三版不需要再拆** → 保持"三版共用一个配置目录" ✓
 if (!isE2E && !devUserDataDir) {
   const legacyUserDataDir = path.join(
     app.getPath("appData"),
@@ -220,6 +217,45 @@ function logMain(message: string) {
   appendStartupLog("main.log", `${new Date().toISOString()} ${message}`);
 }
 
+/*
+ * 自用（2026-10-17）：启动期「主线程被谁占住」体检器。
+ *
+ * 现象：`[bg] startRemaining done` → `[bg] ensureModelAvailable done` 这一段，
+ * 从 **2026-10-16 00:55** 起每次启动多出 **6~22 秒**（之前 9 天每次都是 0 秒 ✓），
+ * 而这段里**一条日志都没有** → 主线程被某段"不写日志的同步活儿"占住了 ✗
+ * （用户："启动又要等好几秒白屏了"）。
+ *
+ * 做法：每 100ms 记一次时间，**实际间隔比 100ms 多出来的部分 = 卡顿**；
+ * 卡顿 ≥300ms 就写一条到 main.log（带"启动后第几秒"）。
+ * 只在前 90 秒工作，之后自动停 —— 平时安静、出事有据 ✓。
+ */
+let startupLagTimer: NodeJS.Timeout | null = null;
+/** 启动体检起点（给各段日志统一换算"启动后第几秒"）。 */
+let startupProbeStartedAt = Date.now();
+function startStartupLagProbe(limitMs = 90_000): void {
+  if (startupLagTimer) {
+    return;
+  }
+  startupProbeStartedAt = Date.now();
+  const startedAt = startupProbeStartedAt;
+  let last = Date.now();
+  startupLagTimer = setInterval(() => {
+    const now = Date.now();
+    const drift = now - last - 100;
+    last = now;
+    if (drift >= 300) {
+      logMain(
+        `[perf] 主线程卡顿 ${drift}ms（启动后 ${((now - startedAt) / 1000).toFixed(1)}s）`
+      );
+    }
+    if (now - startedAt > limitMs) {
+      clearInterval(startupLagTimer as NodeJS.Timeout);
+      startupLagTimer = null;
+      logMain("[perf] 启动体检结束（90 秒）");
+    }
+  }, 100);
+}
+
 function summarizePathState(label: string, targetPath: string): string {
   try {
     const exists = fs.existsSync(targetPath);
@@ -269,15 +305,6 @@ function logPackagedPathDiagnostics() {
         "app.asar.unpacked",
         "scripts",
         "embed-worker.mjs"
-      )
-    ),
-    summarizePathState(
-      "asar-unpacked-face-worker",
-      path.join(
-        process.resourcesPath,
-        "app.asar.unpacked",
-        "scripts",
-        "face-worker.mjs"
       )
     ),
     summarizePathState(
@@ -434,6 +461,17 @@ function getIconPath(): string {
   return path.join(app.getAppPath(), "assets", "icon.png");
 }
 
+/*
+ * 自用（2026-10-18）：托盘只有 16px，整张立绘缩下去会糊 → 托盘单独用**头部特写**（透明底）✓
+ */
+function getTrayIconPath(): string {
+  const name = "icon-tray.png";
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, name);
+  }
+  return path.join(app.getAppPath(), "assets", name);
+}
+
 function buildTrayMenu(): Electron.Menu {
   return Menu.buildFromTemplate([
     {
@@ -473,7 +511,9 @@ function rebuildTrayMenu() {
 onMainLocaleChanged(rebuildTrayMenu);
 
 function createTray() {
-  const iconPath = getIconPath();
+  // 托盘优先用"头部特写"；没有就退回整图 ✓
+  const trayIconPath = getTrayIconPath();
+  const iconPath = fs.existsSync(trayIconPath) ? trayIconPath : getIconPath();
   if (fs.existsSync(iconPath)) {
     const img = nativeImage.createFromPath(iconPath);
     tray = new Tray(img.resize({ width: 16, height: 16 }));
@@ -614,42 +654,25 @@ const mediaSemaphore = new IoSemaphore(16);
 //
 // ── AI model availability (copy from resources or dev paths) ─────────
 
-async function verifyCurrentFaceModels(modelsDir: string): Promise<{
-  invalidFiles: string[];
-  valid: boolean;
-}> {
-  const activeFaceModel = getActiveFaceModel();
-  const invalidFiles: string[] = [];
-
-  for (const fileName of activeFaceModel.modelFiles) {
-    const entry = MODEL_MANIFEST.find(
-      (candidate) =>
-        candidate.subPath === "face" && candidate.fileName === fileName
-    );
-    const filePath = path.join(modelsDir, "face", fileName);
-    if (
-      !(
-        entry &&
-        (await verifyModelFile(filePath, entry.sha256, entry.sizeBytes))
-      )
-    ) {
-      invalidFiles.push(fileName);
-    }
-  }
-
-  return { invalidFiles, valid: invalidFiles.length === 0 };
-}
-
 async function hasCurrentModels(modelsDir: string): Promise<boolean> {
+  /*
+   * 自用（NEXT，2026-10，用户要求）：**不再把 opus-mt（中译英）算作"当前模型"** ✗→✓。
+   *
+   * 缘由：用户已要求把 SigLIP 与 opus-mt **彻底移除**（旧模型不好用、也不留回退），
+   * 而嵌入模型换成了**中文原生**的 Chinese-CLIP —— 中文查询直接编码，**根本不走翻译那一步**。
+   *
+   * 为什么必须删掉这两条检查：原来它们检查 `Xenova/opus-mt-zh-en/onnx/` 下的两个文件，
+   * 模型一旦被移除，这里**永远返回 false** → `ensureModelAvailable()` 每次都判定
+   * "模型不完整" → 反复重新复制/下载，删了也白删 ✗。
+   *
+   * 注意第一条 marker **保持原样**：`getEmbeddingModelFile()` 会按**当前**嵌入模型
+   * 解析路径，换成 Chinese-CLIP 后它自然指向 `chinese-clip-.../model_quantized.onnx` ✓。
+   */
   const markers = [
     getEmbeddingModelFile(modelsDir, "vision_model_quantized.onnx"),
-    getTranslationModelFile(modelsDir, "encoder_model_quantized.onnx"),
-    getTranslationModelFile(modelsDir, "decoder_model_merged_quantized.onnx"),
   ];
-  const faceValidation = await verifyCurrentFaceModels(modelsDir);
-  return (
-    markers.every((marker) => fs.existsSync(marker)) && faceValidation.valid
-  );
+  // 自用（2026-10-18 · 会话#9）：SFace 已整体剔除，不再校验人脸模型 ✓
+  return markers.every((marker) => fs.existsSync(marker));
 }
 
 async function copyBundledModels(modelsDir: string): Promise<void> {
@@ -658,30 +681,20 @@ async function copyBundledModels(modelsDir: string): Promise<void> {
     bundledModels,
     "vision_model_quantized.onnx"
   );
-  const bundledFaceValidation = await verifyCurrentFaceModels(bundledModels);
-
   log.info(
-    "[ensureModelAvailable] bundledModels=%s exists=%s bundledMarker=%s exists=%s faceValid=%s",
+    "[ensureModelAvailable] bundledModels=%s exists=%s bundledMarker=%s exists=%s",
     bundledModels,
     fs.existsSync(bundledModels),
     bundledMarker,
-    fs.existsSync(bundledMarker),
-    bundledFaceValidation.valid
+    fs.existsSync(bundledMarker)
   );
-  if (!(fs.existsSync(bundledMarker) && bundledFaceValidation.valid)) {
-    throw new Error(
-      `Bundled AI models are incomplete or failed hash verification; invalid face files: ${bundledFaceValidation.invalidFiles.join(", ") || "none"}`
-    );
+  if (!fs.existsSync(bundledMarker)) {
+    throw new Error("Bundled AI models are incomplete or failed hash verification");
   }
 
   log.info("Copying AI models from bundled resources...");
   try {
     await copyModelsOnce();
-    await fs.promises.cp(
-      path.join(bundledModels, "face"),
-      path.join(modelsDir, "face"),
-      { recursive: true }
-    );
     const copied = await hasCurrentModels(modelsDir);
     const visionMarker = getEmbeddingModelFile(
       modelsDir,
@@ -697,10 +710,10 @@ async function copyBundledModels(modelsDir: string): Promise<void> {
     );
     if (!copied || size <= 0) {
       throw new Error(
-        "Copied AI models failed startup verification, including the active face model"
+        "Copied AI models failed startup verification"
       );
     }
-    log.info("AI models copied and current face model hashes verified");
+    log.info("AI models copied and hash verified");
   } catch (err) {
     log.error({ err }, "Failed to copy AI models from resources");
     throw err;
@@ -726,18 +739,11 @@ async function copyDevModels(modelsDir: string): Promise<void> {
     log.info({ source: candidate }, "Copying AI models from dev path");
     try {
       await fs.promises.cp(candidate, modelsDir, { recursive: true });
-      const copiedFaceValidation = await verifyCurrentFaceModels(modelsDir);
-      if (copiedFaceValidation.valid) {
-        log.info("AI models copied and current face model hashes verified");
+      if (await hasCurrentModels(modelsDir)) {
+        log.info("AI models copied and hash verified");
         return;
       }
-      log.warn(
-        {
-          invalidFiles: copiedFaceValidation.invalidFiles,
-          source: candidate,
-        },
-        "Dev model copy rejected because the active face model failed hash verification"
-      );
+      log.warn({ source: candidate }, "Dev model copy failed verification");
     } catch (err) {
       log.warn({ err, source: candidate }, "Failed to copy from dev path");
     }
@@ -747,9 +753,16 @@ async function copyDevModels(modelsDir: string): Promise<void> {
 
 async function ensureModelAvailable(): Promise<void> {
   const modelsDir = path.join(getDataPath(), "models");
-  if (await hasCurrentModels(modelsDir)) {
+  /*
+   * 自用（2026-10-17）：把这一步的耗时写进 main.log ——
+   * 它正好是"白屏那 6~22 秒"的终点，必须量出来到底是"校验本身慢"还是"被别的东西挡住"。
+   */
+  const checkStartedAt = Date.now();
+  const modelsReady = await hasCurrentModels(modelsDir);
+  logMain(`[perf] 模型校验 ${Date.now() - checkStartedAt}ms → ${modelsReady}`);
+  if (modelsReady) {
     log.info(
-      "AI models already cached and face hashes verified at %s",
+      "AI models already cached and hash verified at %s",
       modelsDir
     );
     return;
@@ -825,6 +838,9 @@ function createWindow(httpPort: number, httpAuthToken: string) {
     minWidth: 720,
     minHeight: 480,
     show: false,
+    // 自用（2026-10-17）：**别再是默认白** —— 窗口先出来时用主题底色，
+    // 这样"还没画完就叫出来"看到的是深/浅底色，而不是刺眼的白屏 ✗→✓
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#08090a" : "#fbfbfc",
     ...(savedBounds && isBoundsVisible(savedBounds)
       ? { x: savedX, y: savedY }
       : {}),
@@ -984,13 +1000,55 @@ function createWindow(httpPort: number, httpAuthToken: string) {
     }
     mainWindow?.webContents.send("window:maximize-change", false);
   });
+  /*
+   * 自用（2026-10-17，用户口径）：**窗口要等"界面真的画出来"再显示** ✓
+   *
+   * 用户观察（关键）：「托盘图标都出来了，窗口却自己不弹；我点开它才看到白屏；
+   *   等它自己出来就没有白屏」→ 也就是说，**弹窗时机**决定了会不会看到白屏 ✗。
+   *
+   * 为什么不能用 `ready-to-show`：它只代表"网页的**第一个空白帧**画好了"
+   * —— 实测**启动后 0.8 秒**就触发，那时 React 连一个字都还没渲染 ✗，
+   * 于是窗口先出来、里面一片白/空 ✗（用户看到的正是这个）。
+   *
+   * 所以改成：**渲染层在自己画完第一帧后发一条 IPC 回来**（`app:renderer-ready`），
+   * 主进程收到才 `show()` ✓ —— 窗口一出现就是界面（dev 版多等的几秒是 Vite 渲染代价，
+   * 打包版几乎瞬间，所以打包版感觉不到）。
+   * 兜底：12 秒还没收到（极端情况）就照常显示，绝不至于"永远不开窗" ✓。
+   */
+  let windowShown = false;
+  const showMainWindowWhenRendered = (reason: string) => {
+    if (windowShown || isQuitting || !mainWindow || mainWindow.isDestroyed()) {
+      return;
+    }
+    windowShown = true;
+    mainWindow.show();
+    mainWindow.focus();
+    logMain(
+      `[perf] 窗口已显示（${reason}，启动后 ${((Date.now() - startupProbeStartedAt) / 1000).toFixed(1)}s）`
+    );
+  };
+  const onRendererReady = () => showMainWindowWhenRendered("渲染层首帧已画");
+  ipcMain.on("app:renderer-ready", onRendererReady);
+  const rendererReadyFallback = setTimeout(
+    () => showMainWindowWhenRendered("等渲染首帧超时 12s 兜底"),
+    12_000
+  );
   mainWindow.once("ready-to-show", () => {
-    mainWindow?.show();
-    mainWindow?.focus();
+    // 只记录时间，**不再据此显示窗口**（那时通常是空白帧）
+    logMain(
+      `[perf] ready-to-show（首个空白帧，启动后 ${((Date.now() - startupProbeStartedAt) / 1000).toFixed(1)}s）`
+    );
   });
   mainWindow.webContents.on("did-finish-load", () => {
+    logMain(
+      `[perf] 渲染层加载完成（启动后 ${((Date.now() - startupProbeStartedAt) / 1000).toFixed(1)}s）`
+    );
     lifecycleBridge.publish("initial");
     applyUiZoomScale();
+  });
+  mainWindow.once("closed", () => {
+    clearTimeout(rendererReadyFallback);
+    ipcMain.removeListener("app:renderer-ready", onRendererReady);
   });
   mainWindow.webContents.on("console-message", (details) => {
     if (details.level !== "warning" && details.level !== "error") {
@@ -1473,11 +1531,11 @@ fs.writeFileSync(path.join(logDir, "startup.log"), "BEFORE_WHENREADY\n", {
 // Windows AUMID — 没有它 dev 模式下 Notification 会被系统静默丢弃
 if (process.platform === "win32") {
   // 自用版使用独立的 AppUserModelId，让 Windows 任务栏把它与上游原版视为两个不同的应用。
-  // 2026-10 起加 "LAN" 后缀：本地版与 LAN 版各自独立分组，互不覆盖图标；
+  // 2026-10 起带 "NEXT" 后缀：三个版本各自独立分组，互不覆盖图标；
   // 这个值必须与 forge.config.ts 里 MakerWix 的 appUserModelId **完全一致** ——
   // Windows 是用它把窗口和「开始菜单快捷方式」关联起来取任务栏图标的，
   // 对不上时任务栏就会退回 exe 自带的图标（dev 下即 Electron 的原子图标）。
-  app.setAppUserModelId("com.private.ai-anime-image-manager-lan");
+  app.setAppUserModelId("com.private.ai-anime-image-manager-next");
 }
 
 const BROWSER_COMPATIBLE_EXTENSIONS = new Set([
@@ -1640,6 +1698,8 @@ app.whenReady().then(async () => {
 
     await setupORPC();
     createWindow(httpPort, getHttpServerAuthToken());
+    // 自用（2026-10-17）：启动期主线程卡顿体检（90 秒后自动停，见 startStartupLagProbe）
+    startStartupLagProbe();
     createTray();
     registerGlobalShortcuts();
     checkForUpdates();
@@ -1766,8 +1826,52 @@ async function waitForQuitCleanup(
   }
 }
 
+/**
+ * 退出前优雅收尾"建向量"（自用·吞吐修复 2026-10-09）。
+ *
+ * 问题（日志实测）：用户关窗口/退出时，主进程直接 `terminateTrackedChildProcessesSync()`
+ * 把正在推理的 embed worker 用 SIGTERM 杀掉 —— 上一批"已算完但还没落库/没写标记"的
+ * 照片就变成**半嵌入**状态（向量库里有、SQLite 标记说没有，或反过来）。
+ * 下次启动的自检会把这些照片重新排队甚至整批清理重跑，等于白跑。
+ *
+ * 做法：先请求取消（worker 会在**当前批次边界**停下），等它真正结束后再继续走原来的
+ * 终止流程。超时（30 秒）就放弃等待 —— 退出不能被一个卡死的 worker 拖住。
+ */
+async function settleRunningEmbeddingBeforeQuit(): Promise<void> {
+  try {
+    const { cancelEmbedding, isCurrentEmbeddingRun, activeEmbeddingRunId } =
+      await import("@/services/ai-embedder");
+    const runId = activeEmbeddingRunId;
+    if (runId <= 0) {
+      return;
+    }
+    log.info(`quit cleanup: 建向量仍在进行（run ${runId}），先请求停止并等待收尾`);
+    cancelEmbedding();
+    /**
+     * 等待上限。
+     *
+     * ⚠️ 2026-10-09 实测教训：原来是 30 秒，而一轮大批量建向量**刚被取消时会先跑清理
+     * （可能好几分钟）**，30 秒必然超时 → 进程直接退出 → 已建好的向量被回滚，
+     * 用户白跑 20 分钟。这里放宽到 5 分钟，让收尾有机会做完。
+     */
+    const deadline = Date.now() + 300_000;
+    while (isCurrentEmbeddingRun(runId) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    if (isCurrentEmbeddingRun(runId)) {
+      log.warn("quit cleanup: 等待建向量收尾超时（5 分钟），继续退出");
+    } else {
+      log.info("quit cleanup: 建向量已收尾");
+    }
+  } catch (error) {
+    log.warn({ err: error }, "quit cleanup: 收尾建向量时出错（忽略，继续退出）");
+  }
+}
+
 async function cleanupApplicationBeforeQuit(): Promise<void> {
   log.info("quit cleanup: started");
+  // 先让"建向量"在批次边界停下并落库，避免半嵌入（必须早于杀子进程）
+  await settleRunningEmbeddingBeforeQuit();
   const { suspendImportsForShutdown } = await import("@/services/import-queue");
   suspendImportsForShutdown();
   stopAutomaticChecks();
@@ -1798,12 +1902,6 @@ async function cleanupApplicationBeforeQuit(): Promise<void> {
     log.warn({ err: error }, "Failed to dispose wander lifecycle bridge");
   }
   wanderLifecycleBridge = null;
-
-  // Face detection is not a registry-owned service and may have its own
-  // Electron worker pool. Invalidate the run before terminating its children
-  // so rejected worker promises cannot persist late results during shutdown.
-  cancelFaceDetection();
-  shutdownFacePool();
 
   // Kill forked ELECTRON_RUN_AS_NODE workers first. This both unlocks the
   // installed executable for MSI and causes pending service operations to

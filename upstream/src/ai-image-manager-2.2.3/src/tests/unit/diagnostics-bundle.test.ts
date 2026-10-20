@@ -228,7 +228,7 @@ describe("diagnostic bundle metadata", () => {
     const result = buildGitHubIssue({ incident, input, manifest });
 
     expect(result.issueUrl).toContain(
-      "github.com/ASakurafoxA/AI-Anime-Image-Manager-LAN/issues/new"
+      "github.com/ASakurafoxA/AI-Anime-Image-Manager-NEXT/issues/new"
     );
     expect(result.issueBody).toContain(incident.id);
     expect(result.issueBody).toContain(incident.fingerprint);

@@ -28,7 +28,7 @@
  *    一变，`app.getPath("userData")` 就会指向一个新目录，用户的图库位置、
  *    标签、局域网口令会**全部看起来丢失**。
  */
-export const APP_DISPLAY_NAME = "AI Anime Image Manager LAN";
+export const APP_DISPLAY_NAME = "AI Anime Image Manager WD";
 
 /**
  * 自用（需求 8）：本版本的仓库地址 —— "关于"页里"本项目主页"按钮跳这里。
@@ -220,6 +220,33 @@ export const PRIVATE_BUILD = {
    * 崩溃时的致命错误对话框不受影响（那种情况仍然能直接生成报告）。
    */
   disableDiagnostics: false,
+
+  /**
+   * 自用（性能 C 的回退开关）：标签徽标统计是否走**旧写法**。
+   *
+   * 旧写法：整棵标签闭包 JOIN photo_tags 再 COUNT(DISTINCT) —— 实测 4106ms。
+   * 新写法（false）：叶子用直接计数、只有 19 个有子标签的节点做子树聚合，
+   * 结果与旧写法**逐一相同**（已用真实库比对 11,670 个标签，0 处差异）。
+   * 万一新写法在别的库上出问题，把这里改回 true 即可完全恢复原样。
+   */
+  legacyBadgeCountQuery: false,
+
+  /**
+   * 自用精简：去掉照片详情里的「AI 建议标签」整块（上游功能）。
+   *
+   * 为什么：那是上游的通用图像模型给的建议（猫咪 / 宠物 / 雨天这类），
+   * 与自用版的 Danbooru 标签体系不是一回事，放着只会让人误点。
+   * 代码保留：改回 false 即可恢复。
+   */
+  hideAiSuggestedTags: true,
+
+  /**
+   * 自用精简：选中工具栏只留常用项。
+   *   · 去掉「添加到相册」（自用版已隐藏相册入口）
+   *   · 去掉「批量打标签」（点旁边的标签区加标签就够了）
+   *   · 把「重命名」从「更多」折叠菜单里提出来，直接摆在工具栏上
+   */
+  slimSelectionToolbar: true,
 
   /**
    * 搜索界面精简（与本地工作区保持一致，见根目录「需跟进到局域网工作区的改动.md」）：

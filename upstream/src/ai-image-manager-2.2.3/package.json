@@ -1,6 +1,6 @@
 {
   "name": "ai-anime-image-manager",
-  "productName": "AI Anime Image Manager NEXT",
+  "productName": "AI Anime Image Manager WD",
   "version": "2.2.3",
   "description": "Local AI image manager: semantic search, duplicate detection, AI tagging, character recognition",
   "main": ".vite/build/bootstrap.js",

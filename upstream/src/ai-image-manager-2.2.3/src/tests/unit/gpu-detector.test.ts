@@ -129,4 +129,33 @@ describe("cached GPU detection", () => {
 
     expect(setSettingMock).not.toHaveBeenCalled();
   });
+
+  /**
+   * 自用（多卡·回归）：探针失败时**不能把已知的显卡列表抹掉**。
+   *
+   * 用户截图那个 bug：某个任务占满显卡时探针失败（"worker exited unexpectedly"），
+   * 失败结果里没有 `adapters` 字段，直接覆盖缓存会让 `adapters` 变空
+   * → 设置页「使用显卡」+ 多卡开关**整段消失**。
+   */
+  it("keeps the known adapter list when a probe fails", () => {
+    getSettingMock.mockReturnValue(
+      JSON.stringify({
+        detectorVersion: GPU_DETECTOR_VERSION,
+        adapters: [
+          { deviceId: 2, name: "NVIDIA GeForce RTX 4070 Ti SUPER", ok: true },
+        ],
+        dmlAvailable: true,
+        dmlDeviceId: 2,
+        gpuName: "NVIDIA GeForce RTX 4070 Ti SUPER",
+        probeTimeMs: 20,
+      })
+    );
+
+    recordEmbeddingProbeResult(false, null, "Probe worker exited unexpectedly");
+
+    const written = setSettingMock.mock.calls.at(-1)?.[1] as string;
+    expect(written).toContain("NVIDIA GeForce RTX 4070 Ti SUPER");
+    expect(written).toContain('"adapters":[{"deviceId":2');
+    expect(written).toContain('"embeddingDmlAvailable":false');
+  });
 });

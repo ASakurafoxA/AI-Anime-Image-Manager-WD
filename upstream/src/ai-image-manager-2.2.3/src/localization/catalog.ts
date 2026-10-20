@@ -89,7 +89,7 @@ const BUILTIN_MAIN_CATALOGS: Record<string, MainLocaleCatalog> = {
     minimizeToTray: "Minimize to tray",
     quit: "Quit",
     showWindow: "Show Window",
-    tooltip: "AI Anime Image Manager LAN",
+    tooltip: "AI Anime Image Manager NEXT",
   },
   zh: {
     closeWindowQuestion: "关闭窗口时要如何处理？",

@@ -39,6 +39,12 @@ export interface EmbedProgress {
   processed: number;
   /** 非空时表示这是一次自动修复引起的重新索引，值为修复原因 */
   repairReason?: string;
+  /*
+   * 2026-10-20（会话#10）：**"已暂停"要跟着进度一起推出去**。
+   * 建向量暂停时只改了 phase，没带这个字段 → 界面（尤其顶栏）拿到的是
+   * "AI 特征提取 x/y"、isPaused 丢了，于是暂停后看起来还在跑、也没有「继续」。
+   */
+  isPaused?: boolean;
   total: number;
 }
 
@@ -69,6 +75,15 @@ export let colorTable: LanceTable | null = null;
  * 所以「以图搜图」优先用它。与 SigLIP 的 photo_embeddings 分表存放，互不干扰。
  */
 export let wd14Table: LanceTable | null = null;
+/**
+ * 自用新增：CCIP（deepghs/ccip-caformer_b36-24）角色特征表（768 维）。
+ *
+ * 用途：**角色识别**（把同一角色的图归组、命名）。CCIP 是角色专用特征，
+ * 实测对"区分角色"远强于现有整图特征（Chinese-CLIP 角色内/角色间差距仅 +0.06，
+ * 而 CCIP 成对 F1 0.848）。同样**只新增一张表**，photo_embeddings 一动不动，
+ * 便于"首选 CCIP、缺模型回退 CLIP"。
+ */
+export let ccipTable: LanceTable | null = null;
 export let isModelLoaded = false;
 export let isVectorDBReady = false;
 export let embeddingModel: EmbeddingModel | null = null;
@@ -109,6 +124,10 @@ export function setColorTable(t: LanceTable | null): void {
 /** 自用新增：设置 WD14 特征表句柄。 */
 export function setWd14Table(t: LanceTable | null): void {
   wd14Table = t;
+}
+/** 自用新增：设置 CCIP 角色特征表句柄（768 维，独立于其它表）。 */
+export function setCcipTable(t: LanceTable | null): void {
+  ccipTable = t;
 }
 export function setIsModelLoaded(v: boolean): void {
   isModelLoaded = v;

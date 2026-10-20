@@ -8,23 +8,24 @@
  *   之后再点按钮，`isFullRunDone()` 仍是 false，游标被归零，
  *   已经打好的几千张会被**从头重打一遍**。这就是用户报的"建库中途退出后再建库要从头开始"。
  *
- * 现在的规则：
- *   · 有游标（> 0）→ **绝不**归零，从游标继续（断点续跑）。
- *   · 游标本来就是 0 → 归零等于没做事（首次建库走这里，等于全库扫一遍）。
- *   · 想**强制**全库重扫（例如换了模型要把旧标签全部重打）→ 用
- *     `resetPixaiTaggingProgress()` / `resetWd14TaggingProgress()` 显式清掉游标与完成标记，
- *     这是唯一会"从头开始"的入口，必须是用户明确要求的操作。
+ * 现在的规则（两个出口，语义严格分开）：
+ *   · **默认（界面上点"生成 AI 标签"）**：调用方传 `resetCursor: false` 或不传 →
+ *     **永不归零**，从游标继续。这是"断点续跑"，也是绝大多数情况该走的路。
+ *   · **显式要求从头**：调用方传 `resetCursor: true` →
+ *     **无条件归零**（`forceResetCursor: true` 语义）。
+ *     只有"换模型要把旧标签全部重打"这类明确意图才该这么做，例如无头命令
+ *     `--run-pixai-tagging`（它另有 `--tag-resume` 走续跑）。
+ *
+ * ⚠️ 曾经的坑：把"调用方传了 true"和"只有全新库才该归零"混在一个判定里，
+ *    导致"全库重跑"入口在已有游标的库上**静默退化成续跑**（第 10 轮发现并修掉）。
+ *    所以 `cursor` / `fullRunDone` 只作为**日志与断言**的输入，不再参与"是否归零"的决策。
  */
 export function shouldResetTaggingCursor(
   options: { resetCursor?: boolean },
   state: { cursor: number; fullRunDone: boolean }
 ): boolean {
-  if (!options.resetCursor) {
-    return false;
-  }
-  if (state.fullRunDone) {
-    return false;
-  }
-  // 只有"确实一张都还没打"时才允许归零。
-  return state.cursor <= 0;
+  // state 目前不参与决策，但保留参数：调用方（两个 tagger）都在读游标与完成标记，
+  // 传进来便于日志与单元测试断言"当时库里是什么状态"。
+  void state;
+  return options.resetCursor === true;
 }

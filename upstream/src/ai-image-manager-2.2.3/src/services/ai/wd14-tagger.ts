@@ -14,7 +14,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { and, eq, gt, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lte, sql } from "drizzle-orm";
 import { PRIVATE_BUILD } from "@/config/private-build";
 import { getDatabase } from "@/db";
 import { photos, photoTags, tags } from "@/db/schema";
@@ -22,7 +22,6 @@ import { getSetting, setSetting } from "@/services/settings-manager";
 import { invalidateTagSearch } from "@/services/tag-search-revision";
 import { createLogger } from "@/utils/logger";
 import { shouldResetTaggingCursor } from "./tagging-cursor";
-import { WD14_CHARACTER_ZH } from "./wd14-name-zh";
 import {
   categorizeWd14Tag,
   WD14_TAG_CATEGORIES,
@@ -77,8 +76,40 @@ export function isWd14TaggingRunning(): boolean {
   return running;
 }
 
+/**
+ * 自用（2026-10-17，用户口径）：**真正挂起式暂停（WD14 版）**
+ *
+ * 与打标链路一致：pause 只置标志 → 循环在批边界原地等、worker 不销毁
+ * （模型保持热态），所以"继续"是秒接（老做法是取消 + 等停 + 重新初始化）✓
+ */
+let suspendRequested = false;
+
+/** 自用：是否处于挂起状态 */
+export function isWd14TaggingSuspended(): boolean {
+  return suspendRequested;
+}
+
+/** 自用：挂起（不杀 worker、不丢进度） */
+export function pauseWd14Tagging(): void {
+  suspendRequested = true;
+}
+
+/** 自用：恢复（清标志，循环立刻接着跑） */
+export function resumeWd14Tagging(): void {
+  suspendRequested = false;
+}
+
+/** 自用：挂起等待（批边界调用；取消优先） */
+async function waitWhileSuspended(): Promise<void> {
+  while (suspendRequested && !cancelRequested) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+}
+
 export function cancelWd14Tagging(): void {
   cancelRequested = true;
+  // 自用：取消同时清挂起，否则循环会卡在等待里 ✗
+  suspendRequested = false;
 }
 
 function vocabPath(modelsDir: string): string {
@@ -143,7 +174,7 @@ export function baseNameOf(storedName: string): string {
 
 /** 生成落库的显示名：有中文就用 `中文 (english)`，否则保持英文。 */
 function displayNameFor(english: string, zh: Map<string, string>): string {
-  const chinese = zh.get(english) ?? WD14_CHARACTER_ZH[english];
+  const chinese = zh.get(english);
   return chinese ? `${chinese} (${english})` : english;
 }
 
@@ -264,9 +295,9 @@ export function importWd14Vocabulary(modelsDir: string): {
       ? parentCharacter
       : (typeParentByCategory.get(categorizeWd14Tag(name, category)) ??
         parentOther);
-    // 通用标签走 zh_names.csv；**角色标签**走 Danbooru 中文对照表
-    // （wd14-name-zh.ts，自用新增 2026-10-09）—— 表里没有的仍保持英文原名。
-    const targetName = displayNameFor(name, zhNames);
+    // 角色标签没有中文来源（保持英文，可之后右键手动改）；
+    // 通用标签有映射时落库为「中文 (english)」，中英文都能搜到。
+    const targetName = isCharacter ? name : displayNameFor(name, zhNames);
 
     const found = existing.get(name);
     if (found) {
@@ -336,18 +367,30 @@ export function isWd14VocabularyImported(): boolean {
 
 /**
  * 自用（方案 A · 问题 6）：开始前的"累计基线"（库里已打标 / 全库张数）。
+ *
+ * 2026-10-20（会话#10）：`done` 改成**按数据统计**（真的已经有自动标签的张数），
+ * 不再用"游标之前的张数"。旧写法在"导入时自动打标（走 photoIds、不推进游标）"
+ * 之后会算成 0/X，界面看起来像从头重来 —— 与 NEXT 版同一处修正。
  */
 export function getWd14TaggingBaseline(): { done: number; total: number } {
-  const libraryTotal = countRemaining(0);
-  return {
-    done: Math.max(0, libraryTotal - countRemaining(readCursor())),
-    total: libraryTotal,
-  };
+  return { done: countTaggedPhotos(), total: countPhotos() };
 }
 
 /** 是否已经跑完过一次全库重扫（决定下次点按钮是否重置游标）。 */
 export function isFullWd14RunDone(): boolean {
   return getSetting(FULL_RUN_KEY) === "1";
+}
+
+/**
+ * 强制下一次做**全库重打**（"跳过已有自动标签"的优化关掉）。
+ * 光清游标已经不足以触发重打了（按数据判定会跳过有标签的图），
+ * 换打标模型必须走这个显式开关。
+ */
+const FORCE_FULL_KEY = "wd14.tagger.forceFullRescan";
+
+/** 读一下"是否要求全库重打"（不清标记；跑完一轮才清）。 */
+function isForceFullRescanPending(): boolean {
+  return getSetting(FORCE_FULL_KEY) === "1";
 }
 
 /**
@@ -357,6 +400,7 @@ export function isFullWd14RunDone(): boolean {
 export function resetWd14TaggingProgress(): void {
   setSetting(CURSOR_KEY, "0");
   setSetting(FULL_RUN_KEY, "0");
+  setSetting(FORCE_FULL_KEY, "1");
 }
 
 /** 确认词表已导入；必要时执行导入。 */
@@ -380,16 +424,66 @@ function readCursor(): number {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-function countRemaining(cursor: number): number {
+/** 全库（未删除）张数。 */
+function countPhotos(): number {
   const row = getDatabase()
     .select({ n: sql<number>`count(*)` })
     .from(photos)
-    .where(and(isNull(photos.deletedAt), gt(photos.id, cursor)))
+    .where(isNull(photos.deletedAt))
     .get();
   return Number(row?.n ?? 0);
 }
 
-function loadPhotosAfterCursor(cursor: number, limit: number): PhotoRow[] {
+/** id ≤ 给定值的未删除张数（"全库重打"时用它当进度）。 */
+function countPhotosUpTo(photoId: number): number {
+  const row = getDatabase()
+    .select({ n: sql<number>`count(*)` })
+    .from(photos)
+    .where(and(isNull(photos.deletedAt), lte(photos.id, photoId)))
+    .get();
+  return Number(row?.n ?? 0);
+}
+
+/**
+ * 已经有自动标签的照片数 —— **"真的打完标"的唯一口径**（软删图不计）。
+ */
+function countTaggedPhotos(): number {
+  const row = getDatabase()
+    .select({ n: sql<number>`count(*)` })
+    .from(photos)
+    .where(
+      and(
+        isNull(photos.deletedAt),
+        sql`EXISTS (SELECT 1 FROM photo_tags pt WHERE pt.photo_id = ${photos.id} AND pt.origin = 'auto')`
+      )
+    )
+    .get();
+  return Number(row?.n ?? 0);
+}
+
+/** 还没有任何自动标签的照片数（= 这一轮真正要处理的数量）。 */
+function countUntaggedPhotos(): number {
+  const row = getDatabase()
+    .select({ n: sql<number>`count(*)` })
+    .from(photos)
+    .where(and(isNull(photos.deletedAt), notTaggedSql()))
+    .get();
+  return Number(row?.n ?? 0);
+}
+
+/** SQL 片段：这张照片**还没有任何自动标签**（打标断点续跑的判定条件）。 */
+function notTaggedSql() {
+  return sql`NOT EXISTS (SELECT 1 FROM photo_tags pt WHERE pt.photo_id = ${photos.id} AND pt.origin = 'auto')`;
+}
+
+function loadPhotosAfterCursor(
+  cursor: number,
+  limit: number,
+  onlyUntagged = false
+): PhotoRow[] {
+  const where = onlyUntagged
+    ? and(isNull(photos.deletedAt), gt(photos.id, cursor), notTaggedSql())
+    : and(isNull(photos.deletedAt), gt(photos.id, cursor));
   return getDatabase()
     .select({
       id: photos.id,
@@ -397,10 +491,38 @@ function loadPhotosAfterCursor(cursor: number, limit: number): PhotoRow[] {
       path: photos.path,
     })
     .from(photos)
-    .where(and(isNull(photos.deletedAt), gt(photos.id, cursor)))
+    .where(where)
     .orderBy(photos.id)
     .limit(limit)
     .all();
+}
+
+/**
+ * 剔掉"已经不存在/已软删"的 id（导入队列可能留着旧 id → 进度总数显示成旧值）。
+ */
+function filterAlivePhotoIds(ids: number[]): number[] {
+  if (ids.length === 0) {
+    return [];
+  }
+  const db = getDatabase();
+  const alive = new Set<number>();
+  const CHUNK = 400;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const rows = db
+      .select({ id: photos.id })
+      .from(photos)
+      .where(
+        and(
+          isNull(photos.deletedAt),
+          inArray(photos.id, ids.slice(i, i + CHUNK))
+        )
+      )
+      .all();
+    for (const row of rows) {
+      alive.add(row.id);
+    }
+  }
+  return ids.filter((id) => alive.has(id));
 }
 
 function loadPhotosByIds(ids: number[]): PhotoRow[] {
@@ -562,7 +684,8 @@ async function processBatch(
  *
  * @param modelsDir `<dataPath>/models`
  * @param options.photoIds    只打这些照片；不传则按游标增量推进全库
- * @param options.resetCursor 从头开始（全库重跑）
+ * @param options.resetCursor **显式要求从头**（无条件清空游标 → 全库重跑）。
+ *   界面上点"生成 AI 标签"传的是 false（断点续跑）；只有明确要重打才传 true。
  * @param options.maxPhotos   最多处理多少张（用于小范围试点）
  */
 export async function runWd14Tagging(
@@ -587,6 +710,12 @@ export async function runWd14Tagging(
 
   running = true;
   cancelRequested = false;
+  /*
+   * 2026-10-20（会话#10）：**不要在这里清挂起标志**。
+   * 用户在"加载模型"那十几秒里点了暂停时，`pauseTagging` 会先把它立起来；
+   * 这里一清，暂停就白点了（模型加载完照样从头打到尾）。
+   * 上一轮遗留的挂起由 `batchGenerateTags` 的 finally 负责清（不在这里处理）。
+   */
   try {
     ensureWd14Vocabulary(modelsDir);
     // 自用修复：调用方没显式传 useGpu 时，读应用里的「GPU 加速」设置。
@@ -603,15 +732,21 @@ export async function runWd14Tagging(
     let tagged = 0;
     let failed = 0;
     let total: number;
+    // 自用：批量受「占用限制」缩放（100% 时不变）。
     const batchSize = BATCH_SIZE;
 
     if (options.photoIds && options.photoIds.length > 0) {
-      const ids = [...new Set(options.photoIds)];
+      // 队列里可能留着已删除 / 已不存在的 id（幽灵 id）→ 先剔掉，否则总数会显示旧值
+      const ids = filterAlivePhotoIds([...new Set(options.photoIds)]);
       const limited = options.maxPhotos
         ? ids.slice(0, options.maxPhotos)
         : ids;
       total = limited.length;
       for (let i = 0; i < limited.length; i += batchSize) {
+        if (cancelRequested) {
+          break;
+        }
+        await waitWhileSuspended();
         if (cancelRequested) {
           break;
         }
@@ -624,12 +759,18 @@ export async function runWd14Tagging(
         options.onProgress?.({ done, total, tagged, failed });
       }
     } else {
-      if (
+      /*
+       * 2026-10-20（会话#10）：**断点续跑改成按数据判定**（与 NEXT 的 PixAI 同一套口径）。
+       * 游标只是"处理到哪个 id"的高水位；导入时的自动打标走 `photoIds` 分支、不推进游标，
+       * 所以游标会落后于真实进度：重启后既从低处重扫、界面也显示 0/全库。
+       * 现在正常续跑会**跳过已有自动标签的照片**，进度 = 已打标张数 / 全库张数。
+       */
+      const fullRescan =
         shouldResetTaggingCursor(options, {
           cursor: readCursor(),
           fullRunDone: isFullWd14RunDone(),
-        })
-      ) {
+        }) || isForceFullRescanPending();
+      if (fullRescan) {
         // 只有"一张都还没打过"才会走到这里（等于没变化）。
         // ⚠️ 修正（自用·需求 1）：原来只判断 `!isFullWd14RunDone()`，而该标记只在
         //    **完整跑完**时才置位 —— 于是"跑到一半崩溃/关软件/取消"后再点按钮会
@@ -637,30 +778,33 @@ export async function runWd14Tagging(
         //    要强制全库重扫，用 `resetWd14TaggingProgress()`。
         setSetting(CURSOR_KEY, "0");
       }
+      const onlyUntagged = !fullRescan;
       let cursor = readCursor();
-      /*
-       * 自用（方案 A · 问题 6）：进度用**累计口径**上报（processed=库里已完成+本次，
-       * total=全库张数），避免界面显示"0 / 剩余"那种像从头重跑的数字。
-       */
-      const libraryTotal = countRemaining(0);
-      done = Math.max(0, libraryTotal - countRemaining(cursor));
-      total = libraryTotal;
+      /** 本轮真正处理了多少张（maxPhotos 用） */
+      let processedThisRun = 0;
+      total = countPhotos();
+      done = fullRescan ? countPhotosUpTo(cursor) : countTaggedPhotos();
       options.onProgress?.({ done, failed, tagged, total });
       for (;;) {
         if (cancelRequested) {
           break;
         }
-        if (options.maxPhotos && done >= options.maxPhotos) {
+        await waitWhileSuspended();
+        if (cancelRequested) {
           break;
         }
-        const rows = loadPhotosAfterCursor(cursor, batchSize);
+        if (options.maxPhotos && processedThisRun >= options.maxPhotos) {
+          break;
+        }
+        const rows = loadPhotosAfterCursor(cursor, batchSize, onlyUntagged);
         if (rows.length === 0) {
           break;
         }
         const { written } = await processBatch(rows, tagIds);
         cursor = rows[rows.length - 1].id;
         setSetting(CURSOR_KEY, String(cursor));
-        done += rows.length;
+        processedThisRun += rows.length;
+        done += onlyUntagged ? written : rows.length;
         tagged += written;
         failed += rows.length - written;
         options.onProgress?.({ done, total, tagged, failed });
@@ -672,6 +816,8 @@ export async function runWd14Tagging(
       // 标记"已完成一次全库重扫"：下次点按钮只做增量，避免重复扫全库。
       // 需要再强制全库重扫时，清掉 app_settings 里的 wd14.tagger.fullRunDone 即可。
       setSetting(FULL_RUN_KEY, "1");
+      // 全库重打这一轮跑完了，标记可以撤（中途取消/停滞就留着，下次接着补完）
+      setSetting(FORCE_FULL_KEY, "0");
     }
     log.info({ done, tagged, failed }, "WD14 打标结束");
     return { total, tagged, failed, cancelled: cancelRequested };
@@ -691,6 +837,7 @@ export function getWd14TaggingStatus(): {
   return {
     imported: isWd14VocabularyImported(),
     cursor,
-    remaining: countRemaining(cursor),
+    // "还剩多少"按数据算（没有自动标签的张数），不再用"游标之后还剩多少"
+    remaining: countUntaggedPhotos(),
   };
 }

@@ -5,9 +5,12 @@ import { SelectionActionBar } from "@/components/SelectionActionBar";
 import { PRIVATE_BUILD } from "@/config/private-build";
 
 /**
- * ⚠️ 自用版：PRIVATE_BUILD.hideCull === true 把「选片」整个隐藏，
- * 于是更多操作按钮**根本不渲染**（显示条件是 !PRIVATE_BUILD.hideCull && onStartCull）。
- * 上游这两条测的是本版故意不提供的功能 → 跳过，避免被误判为改坏了。
+ * ⚠️ 自用版：`PRIVATE_BUILD.hideCull === true` 会把「选片」整个隐藏，
+ * 于是"更多操作"按钮**根本不渲染**（`SelectionActionBar.tsx` 里
+ * `!PRIVATE_BUILD.hideCull && onStartCull` 才是显示条件）。
+ *
+ * 所以下面两条上游测试测的是**本版故意不提供的功能** → 跳过，
+ * 避免每次跑测试都被误判为"改坏了"。上游行为在 hideCull=false 的版本里另有覆盖。
  */
 const cullUiAvailable = !PRIVATE_BUILD.hideCull;
 

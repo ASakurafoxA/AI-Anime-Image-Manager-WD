@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createLogger } from "@/utils/logger";
 import path from "node:path";
 import { ORPCError, os } from "@orpc/server";
 import {
@@ -13,14 +14,12 @@ import {
   type SQL,
   sql,
 } from "drizzle-orm";
-import { app } from "electron";
+import { app, clipboard } from "electron";
 import type { z } from "zod";
 import { getDatabase } from "@/db";
 import {
   advancedExifData,
   exifData,
-  faceIdentities,
-  faceIdentityMembers,
   folders,
   photoSequenceMembers,
   photos,
@@ -31,10 +30,7 @@ import {
 const GLOB_WILDCARD_RE = /[*?[]/;
 
 import { deletePhotoVectors } from "@/services/ai-embedder";
-import {
-  getFolderSubtreeIds,
-  getFolderTotalPhotoCounts,
-} from "@/services/folder-hierarchy";
+import { getFolderSubtreeIds, getFolderTotalPhotoCounts } from "@/services/folder-hierarchy";
 import { clearTagCountCache } from "@/services/tag-count-cache";
 import { addRemovedFolderPath } from "@/services/folder-exclusions";
 import {
@@ -51,10 +47,13 @@ import {
   cancelAllImports,
   cancelCurrentImport,
   cancelQueuedImports,
+  confirmPendingStartupScans,
+  dismissPendingStartupScans,
   enqueueImport,
   getImportQueueStatus,
 } from "@/services/import-queue";
-import { unwatchFolder } from "@/services/indexer";
+import { suppressWatcherPaths, unwatchFolder } from "@/services/indexer";
+import { replacePathPrefix, validateFolderName } from "@/services/folder-rename";
 import { deletePhotoThumbnails } from "@/services/thumbnailer";
 import {
   FolderAppearanceSchema,
@@ -62,7 +61,16 @@ import {
   HiddenFolderToggleSchema,
   IdSchema,
   ListSchema,
+  RenameFolderSchema,
 } from "./shared";
+
+/** 自用（性能）：超过这个毫秒数才记一条 [perf] 日志，避免日常刷日志。 */
+const PERF_SLOW_MS = 150;
+
+
+/** 自用（性能排查）：把关键路径的真实耗时写进日志，先量再改。 */
+const perf = createLogger("perf");
+
 
 function logIpcError(handlerName: string, err: unknown): void {
   try {
@@ -128,6 +136,18 @@ export const cancelQueuedImports_h = os.handler(() => {
 });
 
 /**
+ * 自用（2026-10-16）：开机补扫「大图库先问一句」的两个动作 ✓ ——
+ * 用户在提示条上点「开始扫描」/「先跳过」时调用。
+ */
+export const confirmStartupScans_h = os.handler(() => {
+  return { started: confirmPendingStartupScans() };
+});
+
+export const dismissStartupScans_h = os.handler(() => {
+  return { dismissed: dismissPendingStartupScans() };
+});
+
+/**
  * 文件夹列表的可复用核心（含"黑名单文件夹的照片不计入其祖先"的计数调整）。
  *
  * 局域网只读 API 与 IPC 共用它 —— 手机端文件夹树的数字因此与桌面完全一致。
@@ -185,6 +205,161 @@ export const setFolderHidden = os
     const state = setFolderHiddenById(input.folderId, input.hidden);
     invalidateCountCache();
     return state;
+  });
+
+/**
+ * 自用新增（2026-10，用户要求）：**在软件里重命名文件夹**。
+ *
+ * 用户口径：
+ *   "加个重命名文件夹的功能，软件里重命名就同步系统文件夹状态，
+ *    如果是系统里先改的没过图库就不管他了，当新的检测入库就好。"
+ *
+ * 也就是：这个入口负责把**磁盘上的文件夹名**和**图库里的记录**一起改掉。
+ * 照片的内部编号不变 → **标签 / 相册 / 收藏 / 人脸 / AI 向量全部保留** ✓
+ *（若用户是在系统里先改的，本功能不追踪，按新图入库处理 ✓。）
+ *
+ * ⚠️ 顺序与回滚（每一步都有理由，别改顺序）：
+ *   ① 先校验（名字合法、目标不存在、源还在磁盘上）；
+ *   ② 登记 watcher **屏蔽窗口** —— 否则 chokidar 会把这次改名看成
+ *      "旧路径下所有文件 unlink"，而 unlink 的处理是 `db.delete(photos)`
+ *      （硬删，关联级联丢失）✗；
+ *   ③ 改磁盘；
+ *   ④ 再迁移数据库（一个事务里改完文件夹与照片的 path）；
+ *   ⑤ 若第 ④ 步失败 → **把磁盘名字改回去**，
+ *      绝不留"磁盘和图库对不上"的状态 ✗。
+ */
+export const renameFolder = os
+  .input(RenameFolderSchema)
+  .handler(async ({ input }) => {
+    const db = getDatabase();
+    const folder = db
+      .select({
+        id: folders.id,
+        path: folders.path,
+        displayName: folders.displayName,
+      })
+      .from(folders)
+      .where(eq(folders.id, input.id))
+      .get();
+    if (!folder) {
+      return { success: false as const, error: "文件夹不存在" };
+    }
+
+    const invalid = validateFolderName(input.newName);
+    if (invalid) {
+      return { success: false as const, error: invalid };
+    }
+    const newName = input.newName.trim();
+    const oldPath = folder.path;
+    const newPath = path.join(path.dirname(oldPath), newName);
+
+    if (path.resolve(newPath) === path.resolve(oldPath)) {
+      return {
+        success: true as const,
+        changed: false,
+        oldPath,
+        newPath,
+        folders: 0,
+        photos: 0,
+      };
+    }
+    if (fs.existsSync(newPath)) {
+      return {
+        success: false as const,
+        error: `「${newName}」已经存在了，换个名字吧`,
+      };
+    }
+    if (!fs.existsSync(oldPath)) {
+      return {
+        success: false as const,
+        error:
+          "这个文件夹在磁盘上已经不在了（可能被移动或删除），请先重新扫描一次",
+      };
+    }
+
+    // ② 屏蔽 watcher：改名期间旧路径/新路径上的事件一律忽略，避免被当成"删除+新增"
+    suppressWatcherPaths([oldPath, newPath]);
+
+    // ③ 改磁盘
+    try {
+      await fs.promises.rename(oldPath, newPath);
+    } catch (error) {
+      return {
+        success: false as const,
+        error: `改磁盘上的文件夹失败：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    }
+
+    // ④ 迁移数据库：本文件夹 + 全部子孙的 path，以及这些文件夹下所有照片的 path
+    let folderCount = 0;
+    let photoCount = 0;
+    try {
+      const folderRows = db
+        .select({ id: folders.id, path: folders.path })
+        .from(folders)
+        .all();
+      const photoRows = db
+        .select({ id: photos.id, path: photos.path })
+        .from(photos)
+        .all();
+      const folderUpdates: Array<{ id: number; next: string }> = [];
+      for (const row of folderRows) {
+        const next = replacePathPrefix(row.path, oldPath, newPath);
+        if (next !== null) {
+          folderUpdates.push({ id: row.id, next });
+        }
+      }
+      const photoUpdates: Array<{ id: number; next: string }> = [];
+      for (const row of photoRows) {
+        const next = replacePathPrefix(row.path, oldPath, newPath);
+        if (next !== null) {
+          photoUpdates.push({ id: row.id, next });
+        }
+      }
+      db.transaction(() => {
+        for (const row of folderUpdates) {
+          db.update(folders)
+            .set({
+              path: row.next,
+              // 只有被改名的那一个文件夹改显示名；子孙文件夹名字没变 ✓
+              ...(row.id === input.id ? { displayName: newName } : {}),
+            })
+            .where(eq(folders.id, row.id))
+            .run();
+        }
+        for (const row of photoUpdates) {
+          db.update(photos)
+            .set({ path: row.next })
+            .where(eq(photos.id, row.id))
+            .run();
+        }
+      });
+      folderCount = folderUpdates.length;
+      photoCount = photoUpdates.length;
+    } catch (error) {
+      // ⑤ 数据库没改成 → 把磁盘名字改回去，保持两边一致
+      await fs.promises.rename(newPath, oldPath).catch(() => undefined);
+      return {
+        success: false as const,
+        error: `更新图库记录失败，已把文件夹名改回原样：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    }
+
+    // 路径变了 → 让"文件夹排除/匹配"那套缓存重新加载
+    reloadFolderMatcher();
+
+    return {
+      success: true as const,
+      changed: true,
+      oldPath,
+      newPath,
+      folders: folderCount,
+      photos: photoCount,
+    };
   });
 
 export const updateFolderAppearance = os
@@ -282,33 +457,10 @@ export const deleteFolder = os.input(IdSchema).handler(async ({ input }) => {
     db.delete(folders).where(eq(folders.id, input.id)).run();
   });
 
-  // 4b) Clean up face identities orphaned by cascade deletion
-  if (allPhotoIds.length > 0) {
-    // Delete identities that no longer have any members
-    const emptyIds = db
-      .select({ id: faceIdentities.id })
-      .from(faceIdentities)
-      .leftJoin(
-        faceIdentityMembers,
-        eq(faceIdentityMembers.identityId, faceIdentities.id)
-      )
-      .where(sql`${faceIdentityMembers.faceVectorId} IS NULL`)
-      .all()
-      .map((r) => r.id);
-    if (emptyIds.length > 0) {
-      db.delete(faceIdentities)
-        .where(inArray(faceIdentities.id, emptyIds))
-        .run();
-    }
-    // Recalculate faceCount for identities that still have members
-    db.run(
-      sql`UPDATE face_identities SET face_count = (
-        SELECT COUNT(DISTINCT fv.photo_id) FROM face_identity_members fim
-        JOIN face_vectors fv ON fv.id = fim.face_vector_id
-        WHERE fim.identity_id = face_identities.id
-      )`
-    );
-  }
+  /*
+   * 4b) 原「清理被级联删除弄空的 face_identities」整段已删。
+   * 2026-10-18（会话#9）：SFace 已整体剔除，身份表不再有写入方，这段清理是死代码 ✓
+   */
 
   // 5) Clean up thumbnails, AI vectors (outside transaction, best-effort)
   for (const p of allPhotoPaths) {
@@ -356,6 +508,7 @@ const totalCache = new Map<string, { value: number; timestamp: number }>();
 // Photo listing
 /** 列表查询的输入类型（与 IPC 的 `ListSchema` 完全一致）。*/
 export type ListPhotosInput = z.infer<typeof ListSchema>;
+
 // ── 标签子树过滤用的临时表 ────────────────────────────────────────────
 // 为什么需要它（2026-10 在本机真实图库上实测：7.7 万图 / 3.1 万标签 / 420 万条 photo_tags，
 // 每张图平均挂 54.5 个标签）：
@@ -434,7 +587,6 @@ function tagGroupCondition(groupId: number): SQL {
       )
   )`;
 }
-
 
 /**
  * 有界探针：第 `groupId` 组标签命中的**关联行数**（最多数到 `limit` 就停）。
@@ -561,9 +713,28 @@ export function queryPhotos(input: ListPhotosInput) {
   // ── 自用精简版：文件夹黑名单（视图级过滤，绝不取消索引）──────────────
   // 黑名单里的照片/缩略图/向量/人脸/phash 全部保留，搜索链路不做过滤，
   // 因此用户仍然可以搜到它们；这里只是不让它们出现在浏览视图里。
+  //
+  // ⚠️ 2026-10 用户口径（NEXT）：**按标签检索时不做这个过滤**——
+  //    「浏览文件夹的时候不显示，按标签检索的时候正常显示」。
+  //    起因：树上徽章是**全局统计**（含黑名单文件夹），而相册口径排除了它们，
+  //    于是"点标签却 0 张"看起来像 bug（实测那 5 个标签命中的照片全在 NSFW 目录里）。
+  //    显式的标签检索应当返回全部命中；只有"按文件夹浏览"才隐藏。
+  const hasTagFilter = Boolean((tagIds && tagIds.length > 0) || tagId != null);
   const folderRows = getAllFolderPathItems();
   const hiddenPaths = getHiddenFolderPaths();
-  const excludedFolderIds = resolveExcludedFolderIds(folderRows);
+  /*
+   * 自用（2026-10 重做主界面交互）：隐藏目录的排除**完全由顶部的眼睛开关决定**。
+   *
+   *   眼睛打开（excludeHiddenFolders === true）→ 不显示隐藏目录里的照片
+   *   眼睛关闭（false / 不传）        → 正常显示（包含被隐藏的目录）
+   *
+   * 之前这里只判断"有没有标签过滤"：浏览视图（无过滤）**无条件排除**隐藏目录 ✗，
+   * 于是右键把文件夹设为隐藏之后，顶部眼睛怎么点都没有效果 —— 用户看到的
+   * "右键菜单的隐藏优先生效"就是这个原因。
+   */
+  const excludedFolderIds = input.excludeHiddenFolders
+    ? resolveExcludedFolderIds(folderRows)
+    : [];
   const excludedIdSet = new Set(excludedFolderIds);
 
   if (folderId) {
@@ -724,7 +895,7 @@ export function queryPhotos(input: ListPhotosInput) {
   if (cachedTotal && Date.now() - cachedTotal.timestamp < COUNT_CACHE_TTL) {
     total = cachedTotal.value;
   } else {
-    // 计数用的条件：AND 模式可能换成「标签侧求交集」的写法（见 buildAndCountConditions）。
+    // 计数用的条件：AND 模式可能换成「从窄的那一组出发」的写法（见 buildAndCountConditions）。
     // 标签条件在 conditions 里是连续的一段 [tagConditionStart, tagConditionEnd)，
     // 所以只要把那一段替换掉即可，文件夹/搜索/收藏等条件原样保留。
     const countConditions = tagCountConditions
@@ -783,6 +954,7 @@ export function queryPhotos(input: ListPhotosInput) {
     );
     // 自用：缩略图角标要显示"这张图命中了你所选标签中的哪几个"（最多 3 个），
     // 所以在同一次查询里把命中的标签名也带上 —— 不额外增加查询。
+    //
     // 自用（问题 2）：角标颜色也要**按所属主类**来（与标签树/顶部 chips 同一套规则），
     // 所以这里顺带把每个命中标签的颜色也算出来（一次性读小表 tags，成本可忽略）。
     const colorTagRows = db
@@ -810,6 +982,7 @@ export function queryPhotos(input: ListPhotosInput) {
       } else if (list.length < 3 && !list.includes(row.tagName)) {
         list.push(row.tagName);
       } else {
+        // 名字已满 3 个（或重复）→ 颜色也保持一一对应
         continue;
       }
       const tagRow = colorTagByName.get(row.tagName);
@@ -853,9 +1026,44 @@ export function queryPhotos(input: ListPhotosInput) {
   };
 }
 
-export const listPhotos = os.input(ListSchema).handler(({ input }) =>
-  queryPhotos(input)
-);
+
+/**
+ * 自用：把**剪贴板里的图片**存成临时 PNG，返回路径给渲染进程做以图搜图。
+ *
+ * 为什么放主进程：渲染进程拿不到系统剪贴板的位图（`clipboard` 是主进程 API），
+ * 而搜索接口要的是**文件路径**，所以这里读剪贴板 → 落盘 → 交回路径。
+ * 剪贴板里没有图片时返回 `{ path: null }`（界面据此提示"剪贴板里没有图片"）。
+ */
+export const saveClipboardImage = os.handler(async () => {
+  const image = clipboard.readImage();
+  if (image.isEmpty()) {
+    return { path: null };
+  }
+  const directory = path.join(app.getPath("temp"), "aim-clipboard-paste");
+  await fs.promises.mkdir(directory, { recursive: true });
+  const filePath = path.join(directory, `paste-${Date.now()}.png`);
+  await fs.promises.writeFile(filePath, image.toPNG());
+  return { path: filePath };
+});
+
+export const listPhotos = os.input(ListSchema).handler(({ input }) => {
+  const perfStartedAt = Date.now();
+  const result = queryPhotos(input);
+  // 只在明显偏慢时记一条（日常使用不会刷日志）
+  const perfMs = Date.now() - perfStartedAt;
+  if (perfMs >= PERF_SLOW_MS) {
+    perf.warn({
+      folderId: input.folderId ?? null,
+      limit: input.limit ?? null,
+      ms: perfMs,
+      offset: input.offset ?? 0,
+      tagCount: (input.tagIds?.length ?? 0) + (input.tagId ? 1 : 0),
+      total: result.total,
+      totalAll: result.totalAll,
+    }, "[perf] listPhotos 偏慢");
+  }
+return result;
+});
 
 // Photo detail
 /** 按 id 取整行照片记录（含 `path`）。局域网 API 用它再映射成不含路径的安全结构。*/
