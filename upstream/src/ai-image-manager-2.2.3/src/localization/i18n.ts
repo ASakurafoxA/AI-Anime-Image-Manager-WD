@@ -1,4 +1,4 @@
-﻿import i18n from "i18next";
+import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import { LOCAL_STORAGE_KEYS } from "@/constants";
 
@@ -963,7 +963,7 @@ i18n.use(initReactI18next).init({
         settingsCharacterPreferCcip: "角色识别优先使用 CCIP 模型",
         settingsCharacterPreferCcipHint:
           "开启时用 CCIP 角色模型（更准）。没放模型文件时会停用角色识别并给出提示；关掉本开关即改用现有 CLIP 特征（较不准确）",
-        settingsCharacterWorkersPerCard: "每卡 worker 数（角色识别）",
+        settingsCharacterWorkersPerCard: "角色识别进程数",
         settingsCharacterWorkersPerCardHint:
           "角色识别是「每张图解码+缩放」的瓶颈，进程越多越快：以每卡 1 个为 100%，实测 2 个约 151%、4 个约 220%，4 个之后不再变快（默认 4）。想更快选 4；机器很忙或不稳就往下调。建向量（CLIP）不受这个设置影响",
         characterRecognitionMenu: "角色识别",
@@ -1029,6 +1029,10 @@ i18n.use(initReactI18next).init({
         manualRolesEmpty: "还没有手动创建的角色。",
         manualRolesPhotoCount: "{{count}} 张",
         manualRolesRename: "改名",
+        manualRolesSetCover: "设为图集封面",
+        manualRolesCoverUpdated: "已设为图集封面",
+        manualRolesBackToList: "返回角色列表",
+        manualRolesEntryHint: "点封面右上角的「展开图集」= 进入这个角色的图集",
         manualRolesExpand: "展开图集",
         manualRolesNoPhotos: "这个角色下暂时没有照片。",
         manualRolesRenameSave: "保存",
@@ -1077,7 +1081,7 @@ i18n.use(initReactI18next).init({
         settingsDependencies: "开源依赖",
         settingsIndexing: "索引",
   settingsSemanticIndexHint:
-    "语义搜索/以图搜图依赖向量索引。没建过或换过模型时，点下面的「重建向量索引」。",
+    "语义搜索/以图搜图依赖向量索引。没建过或换过模型时，点下面的「重建向量索引」；打标会先被挂起，把显卡让给建向量。",
         settingsThumbnailCache: "缩略图缓存",
         settingsThumbnailCacheHint:
           "用于快速显示图片预览；同一图片可能因不同尺寸或对比预览占用多个文件。清除后浏览图片时会按需重新生成。",
@@ -1613,10 +1617,10 @@ i18n.use(initReactI18next).init({
         aiMirrorSettingsHint: "或在下方「AI 镜像设置」中配置",
         aiRetry: "重试",
         aiStartIndex: "开始 AI 索引",
-  aiRebuildIndex: "重建向量索引",
-  aiRebuildIndexHint:
-    "会清空：搜索向量、以图搜图特征、角色特征（CCIP）和「已处理」标记，然后从头重建。照片、标签（含手动标签）都不会动；重建后角色识别要重新点「获取全库角色特征」。",
-  aiRebuildIndexConfirmTitle: "重建向量索引？",
+        aiRebuildIndex: "重建向量索引",
+        aiRebuildIndexHint:
+          "会清空：搜索向量、以图搜图特征、角色特征（CCIP）和「已处理」标记，然后从头重建。照片、标签（含手动标签）都不会动；重建后角色识别要重新点「获取全库角色特征」。",
+        aiRebuildIndexConfirmTitle: "重建向量索引？",
         aiIndexComplete: "AI 索引完成 ({{processed}}/{{total}})",
         aiIndexNewPhotos: "索引新图像",
         aiLoadingEmbedding: "正在加载动漫识别模型... {{percent}}%",
@@ -1677,6 +1681,7 @@ i18n.use(initReactI18next).init({
         gpuDetectedError: "检测失败",
         gpuNotDetected: '未检测 — 点击"检测 GPU"',
         gpuStatusEmbed: "图像嵌入（语义搜索 / 以图搜图）",
+        gpuStatusNotProbed: "还没检测过（点「重新检测」测一次）",
         gpuStatusCharacter: "角色识别（CCIP）",
         gpuStatusActive: "GPU 加速中",
         gpuStatusInactive: "未加速",
@@ -1703,6 +1708,7 @@ i18n.use(initReactI18next).init({
         multiGpuHintOn:
           "已开启：请在「使用显卡」里勾选要并行的卡（最多 3 张）。每张卡各跑 worker，卡数越多越快；改完保存后，下一次 AI 任务生效。",
         multiGpuCardLabel: "卡{{index}}",
+  multiGpuCardAdapter: "适配器 {{id}}",
         multiGpuCardSpeed: "{{speed}} 张/秒",
         multiGpuCardSpeedIdle: "空闲",
 
@@ -1778,23 +1784,21 @@ i18n.use(initReactI18next).init({
         characterDiscoveryApply: "命名",
         peopleFindUnnamedCharactersHint:
           "拿库里已有的角色标签当种子，找出「很像这个角色、但没打这个标签」的图，逐行确认后补成 AI 建议标签（不覆盖已有标签）",
-        characterSuggestProgressSeeds: "正在读取已命名图片的特征 {{done}}/{{total}}",
-        characterSuggestProgressSearch: "正在逐个角色比对 {{done}}/{{total}}",
-        characterSuggestProgressElapsed: "已用 {{seconds}} 秒",
+        characterFeatureModelMissingShort: "未检测到 CCIP 模型，角色识别暂不可用",
+  characterFeatureVectorsMissingShort: "还没算过角色特征：点右上角「获取全库角色特征」",
+  characterFeatureVectorDbNotReadyShort: "向量库正在加载，稍等几秒…",
         characterFeatureModelMissing:
           "角色识别默认用 CCIP 模型，但没检测到模型文件。请把模型放到「图库\\models\\ccip\\model_feat.onnx」；或者到「设置 → 应用行为」关掉「角色识别优先使用 CCIP」（关掉即视为已知情，此时角色特征会复用文字搜图的 CLIP 模型）",
-        characterFeatureModelMissingShort: "未检测到 CCIP 模型，角色识别暂不可用",
         characterFeatureGoSettings: "去设置",
-        gpuStatusNotProbed: "还没检测过（点「重新检测」测一次）",
-        manualRolesBackToList: "返回角色列表",
-        manualRolesEntryHint: "点封面右上角的「展开图集」= 进入这个角色的图集",
-        manualRolesSetCover: "设为图集封面",
-        manualRolesCoverUpdated: "已设为图集封面",
         peopleTaggingGateHint:
           "全库打标完成后才能用（还剩 {{count}} 张未打标）",
         peopleModelCcip: "当前使用 CCIP 模型",
         peopleModelClip: "当前使用 CLIP 特征",
+  peopleModelClipHint: "正在用 CLIP 特征，不需要单独计算（想更准可开启 CCIP）",
         peopleFindUnnamedCharactersBusy: "分析中…",
+        characterSuggestProgressSeeds: "正在读取已命名图片的特征 {{done}}/{{total}}",
+        characterSuggestProgressSearch: "正在逐个角色比对 {{done}}/{{total}}",
+        characterSuggestProgressElapsed: "已用 {{seconds}} 秒",
         peopleFindUnnamedCharactersDone:
           "已为 {{count}} 张图生成角色建议（涉及 {{characters}} 个角色），请到图片详情里确认",
         peopleFindUnnamedCharactersNone:
@@ -2058,6 +2062,15 @@ i18n.use(initReactI18next).init({
         searchMatchSemantic: "语义匹配",
         searchMinSimilarity: "相似度 ≥",
         searchResultLimit: "最多显示",
+        semanticSearchDegraded:
+          "这次语义检索没跑完（超时或不可用），只按文件名/标签匹配了。",
+        semanticSearchRetry: "重试",
+        imageSearchSimilarButton: "继续搜索相似图像",
+        imageSearchSimilarHint:
+          "当前只查找完全一致的图片。要查找更多相似图片，请点下方按钮。",
+        imageSearchSimilarRunning: "正在找相似图…",
+        imageSearchSimilarFound: "又找到 {{count}} 张相似图",
+        imageSearchSimilarEmpty: "没有找到更相似的图片",
         showHiddenFolderPhotos: "显示隐藏目录",
         searchTopSimilarity: "本次最高 {{value}}%",
         searchSimilarityRange: "本次 {{min}}%~{{max}}%",
@@ -2133,6 +2146,20 @@ i18n.use(initReactI18next).init({
         duplicateDecisionSummary:
           "保留 {{keepCount}} · 删除 {{deleteCount}} · 待决定 {{undecidedCount}}",
         duplicateApplyKeepCount: "按数量选择保留",
+        duplicateBulkKeepLabel: "保留",
+        duplicateBulkKeepApply: "应用到全部组",
+        duplicateBulkKeepApplying: "正在应用…",
+        duplicateBulkKeepApplied: "已更新 {{updated}} 个组，跳过 {{skipped}} 个",
+        duplicateAutoQueueLabel: "「应用数量」后直接入队",
+        duplicateHidePixivVariants: "筛除 Pixiv 差分",
+        duplicateHidePixivVariantsHint:
+          "同一作品号的不同分P（id_p0、id_p1…）视为差分，不再显示为重复；只作用于「视觉相似」，不影响「完全相同」",
+        duplicateBulkKeepHint:
+          "只标记保留/删除，不会加入待清理（删除仍需点「清理全部待处理」并确认）",
+        duplicateBulkKeepConfirmTitle: "应用到全部组？",
+        duplicateBulkKeepConfirmDescription:
+          "将对 {{groups}} 个组设置“保留 {{count}} 张”，并覆盖这些组已有的保留/删除选择。这一步只标记选择：既不会删除文件，也不会把这些组加入待清理；删除还需要点「清理全部待处理」并在确认框里确认。",
+        duplicateBulkKeepConfirmAction: "应用",
         duplicateKeepCountOption: "保留 {{count}} 张",
         duplicateKeepAll: "全部保留",
         duplicateKeepCountTitle: "应用保留数量",
@@ -2157,7 +2184,7 @@ i18n.use(initReactI18next).init({
         duplicatePendingStat: "待清理",
         duplicateReclaimStat: "待清理大小",
         duplicateSafetyHint:
-          "每组至少保留一张；清理项先进入应用内最近删除，30 天后移到系统回收站",
+          "每组至少保留一张；清理项先进入应用内最近删除\n30 天后移到系统回收站",
         duplicateScanBusyHint:
           "有 AI 任务正在跑（打标 / 特征提取）—— 查重不和它互斥，但会抢 CPU 和磁盘，速度会变慢",
         duplicateCleanupButton: "清理全部待处理 {{count}} 张",
@@ -2167,6 +2194,7 @@ i18n.use(initReactI18next).init({
         duplicateCleanupDescription:
           "将从 {{groups}} 个重复组中把 {{count}} 张图片移入本应用的“最近删除”（完全相同 {{exactGroups}} 组 / {{exactCount}} 张，视觉相似 {{similarGroups}} 组 / {{similarCount}} 张），待清理大小 {{size}}。每组指定的保留项不会被清理；其他相册和标签关系不会被改写，图片在最近删除期间会从图库视图隐藏。原文件暂不移动，空间要到系统回收站清空后才会释放。",
         duplicateConfirmCleanup: "移入最近删除",
+        duplicateCleanupPreparing: "准备中…",
         duplicateCleanupSuccess: "已将 {{count}} 张重复图片移入最近删除",
         duplicateCleanupPlanFailed: "创建清理计划失败，请刷新后重试",
         duplicateCleanupExecuteFailed: "执行清理计划失败，图片未被部分清理",
@@ -3531,7 +3559,7 @@ i18n.use(initReactI18next).init({
         settingsCharacterPreferCcip: "Prefer the CCIP model for character recognition",
         settingsCharacterPreferCcipHint:
           "When on, character recognition uses the CCIP model (more accurate). If the model files are missing it is disabled with a clear message; turn this off to fall back to the existing CLIP features (less accurate)",
-        settingsCharacterWorkersPerCard: "Workers per GPU (character recognition)",
+        settingsCharacterWorkersPerCard: "Character recognition processes",
         settingsCharacterWorkersPerCardHint:
           "Character recognition is bottlenecked by per-image decode and resize, so more workers is faster: taking 1 per GPU as 100%, measured about 151% with 2 and 220% with 4; it stops improving past 4 (default 4). Pick 4 for speed, lower it if the machine gets busy or unstable. Embedding (CLIP) is not affected by this setting",
         characterRecognitionMenu: "Character recognition",
@@ -3605,6 +3633,11 @@ i18n.use(initReactI18next).init({
         manualRolesPhotoCount: "{{count}} images",
         manualRolesRename: "Rename",
         manualRolesExpand: "Expand gallery",
+        manualRolesBackToList: "Back to roles",
+        manualRolesSetCover: "Set as album cover",
+        manualRolesCoverUpdated: "Album cover updated",
+        manualRolesEntryHint:
+          "Click “Expand gallery” on a cover to open that character’s album",
         manualRolesNoPhotos: "No images under this role yet.",
         manualRolesRenameSave: "Save",
         manualRolesRenameCancel: "Cancel",
@@ -3654,6 +3687,8 @@ i18n.use(initReactI18next).init({
         noResults: "No results",
         settingsDependencies: "Open Source Dependencies",
         settingsIndexing: "Indexing",
+  settingsSemanticIndexHint:
+    "Semantic search depends on the vector index. Use “Rebuild vector index” after changing models; tagging is suspended first so the GPU is free.",
         settingsThumbnailCache: "Thumbnail Cache",
         settingsThumbnailCacheHint:
           "Used for fast image previews; one image may have multiple files for different sizes or comparison previews. Cleared files are regenerated on demand when images are viewed.",
@@ -4231,10 +4266,10 @@ i18n.use(initReactI18next).init({
         aiMirrorSettingsHint: 'Or configure in "AI Mirror Settings" below',
         aiRetry: "Retry",
         aiStartIndex: "Start AI Indexing",
-  aiRebuildIndex: "Rebuild vector index",
-  aiRebuildIndexHint:
-    "Clears: search vectors, image-search features, character features (CCIP) and the processed flags, then rebuilds from scratch. Photos and tags (including manual tags) are untouched; after rebuilding, click \"Get all character features\" again for character recognition.",
-  aiRebuildIndexConfirmTitle: "Rebuild the vector index?",
+        aiRebuildIndex: "Rebuild vector index",
+        aiRebuildIndexHint:
+          "Clears: search vectors, image-search features, character features (CCIP) and the processed flags, then rebuilds from scratch. Photos and tags (including manual tags) are untouched; after rebuilding, click \"Get all character features\" again for character recognition.",
+        aiRebuildIndexConfirmTitle: "Rebuild the vector index?",
         aiIndexComplete: "AI index complete ({{processed}}/{{total}})",
         aiIndexNewPhotos: "Index New Images",
         aiLoadingEmbedding: "Loading anime recognition model... {{percent}}%",
@@ -4298,6 +4333,7 @@ i18n.use(initReactI18next).init({
         gpuDetectedError: "Detection failed",
         gpuNotDetected: 'Not detected — click "Detect GPU"',
         gpuStatusEmbed: "Image embedding (semantic & image search)",
+        gpuStatusNotProbed: "Not probed yet (run “Detect again”)",
         gpuStatusCharacter: "Character recognition (CCIP)",
         gpuStatusActive: "GPU accelerated",
         gpuStatusInactive: "Not accelerated",
@@ -4324,6 +4360,7 @@ i18n.use(initReactI18next).init({
         multiGpuHintOn:
           "On: tick the cards to run in parallel under \"GPU to use\" (up to 3). Each card runs its own workers, so more cards = faster; applies to the next AI task after saving.",
         multiGpuCardLabel: "GPU {{index}}",
+  multiGpuCardAdapter: "Adapter {{id}}",
         multiGpuCardSpeed: "{{speed}} images/s",
         multiGpuCardSpeedIdle: "idle",
 
@@ -4407,26 +4444,25 @@ i18n.use(initReactI18next).init({
         characterDiscoveryApply: "Name",
         peopleFindUnnamedCharactersHint:
           "Uses your existing character tags as seeds: finds photos that look like that character but lack the tag, then lets you confirm row by row (existing tags are never overwritten)",
-        characterSuggestProgressSeeds:
-          "Loading features of named images {{done}}/{{total}}",
-        characterSuggestProgressSearch: "Comparing characters {{done}}/{{total}}",
-        characterSuggestProgressElapsed: "{{seconds}}s elapsed",
-        characterFeatureModelMissing:
-          "Character recognition uses the CCIP model by default, but no model file was found. Put the model at “<library>\\models\\ccip\\model_feat.onnx”, or turn off “Prefer the CCIP model” in Settings → Behavior (turning it off means you accept the fallback, and character features reuse the CLIP model used for text search)",
         characterFeatureModelMissingShort:
           "CCIP model not found — character recognition is unavailable",
+        characterFeatureVectorsMissingShort:
+          "No character features yet: click “Build all character features” (top right)",
+        characterFeatureVectorDbNotReadyShort:
+          "Vector store is still loading, please wait…",
+        characterFeatureModelMissing:
+          "Character recognition uses the CCIP model by default, but no model file was found. Put the model at “<library>\\models\\ccip\\model_feat.onnx”, or turn off “Prefer the CCIP model” in Settings → Behavior (turning it off means you accept the fallback, and character features reuse the CLIP model used for text search)",
         characterFeatureGoSettings: "Open settings",
-        gpuStatusNotProbed: "Not probed yet (run “Detect again”)",
-        manualRolesBackToList: "Back to roles",
-        manualRolesEntryHint:
-          "Click “Expand gallery” on a cover to open that character’s album",
-        manualRolesSetCover: "Set as album cover",
-        manualRolesCoverUpdated: "Album cover updated",
         peopleTaggingGateHint:
           "Available after tagging finishes for the whole library ({{count}} untagged)",
         peopleModelCcip: "Currently using the CCIP model",
         peopleModelClip: "Currently using CLIP features",
+  peopleModelClipHint: "Using CLIP features — no separate build needed (enable CCIP for better accuracy)",
         peopleFindUnnamedCharactersBusy: "Analyzing…",
+        characterSuggestProgressSeeds:
+          "Loading features of named images {{done}}/{{total}}",
+        characterSuggestProgressSearch: "Comparing characters {{done}}/{{total}}",
+        characterSuggestProgressElapsed: "{{seconds}}s elapsed",
         peopleFindUnnamedCharactersDone:
           "Created character suggestions for {{count}} photo(s) across {{characters}} character(s). Confirm them from the photo details.",
         peopleFindUnnamedCharactersNone:
@@ -4698,6 +4734,15 @@ i18n.use(initReactI18next).init({
         searchMatchSemantic: "Semantic match",
         searchMinSimilarity: "Similarity ≥",
         searchResultLimit: "Show up to",
+        semanticSearchDegraded:
+          "Semantic search did not finish this time (timeout or unavailable); only filename/tag matches are shown.",
+        semanticSearchRetry: "Retry",
+        imageSearchSimilarButton: "Search for similar images",
+        imageSearchSimilarHint:
+          "Only exact matches are shown right now. To find more similar images, click the button below.",
+        imageSearchSimilarRunning: "Looking for similar images…",
+        imageSearchSimilarFound: "Found {{count}} more similar images",
+        imageSearchSimilarEmpty: "No more similar images found",
         showHiddenFolderPhotos: "Show hidden folders",
         searchTopSimilarity: "Top score {{value}}%",
         searchSimilarityRange: "This search: {{min}}%–{{max}}%",
@@ -4775,6 +4820,21 @@ i18n.use(initReactI18next).init({
         duplicateDecisionSummary:
           "Keep {{keepCount}} · Delete {{deleteCount}} · Undecided {{undecidedCount}}",
         duplicateApplyKeepCount: "Choose keep count",
+        duplicateBulkKeepLabel: "Keep",
+        duplicateBulkKeepApply: "Apply to all groups",
+        duplicateBulkKeepApplying: "Applying…",
+        duplicateBulkKeepApplied:
+          "Updated {{updated}} groups, skipped {{skipped}}",
+        duplicateAutoQueueLabel: "Queue after applying",
+        duplicateHidePixivVariants: "Hide Pixiv variants",
+        duplicateHidePixivVariantsHint:
+          "Treat different pages of the same Pixiv work (id_p0, id_p1…) as variants instead of duplicates; applies to Visually similar only, never to Exact",
+        duplicateBulkKeepHint:
+          "Marks keep/delete only — nothing is queued (deleting still needs 'Clean up all' plus confirmation)",
+        duplicateBulkKeepConfirmTitle: "Apply to all groups?",
+        duplicateBulkKeepConfirmDescription:
+          'This sets "keep {{count}}" on {{groups}} groups and overwrites their existing keep/delete choices. It only marks choices: nothing is deleted and no group is queued; deleting still requires "Clean up all" plus confirmation.',
+        duplicateBulkKeepConfirmAction: "Apply",
         duplicateKeepCountOption: "Keep {{count}} images",
         duplicateKeepAll: "Keep all",
         duplicateKeepCountTitle: "Apply keep count",
@@ -4800,7 +4860,7 @@ i18n.use(initReactI18next).init({
         duplicatePendingStat: "Pending cleanup",
         duplicateReclaimStat: "Pending file size",
         duplicateSafetyHint:
-          "At least one image is kept per group; cleanup first uses this app’s Recently Deleted, then the system recycle bin after 30 days",
+          "At least one image is kept per group; cleanup first uses this app’s Recently Deleted\nand moves to the system recycle bin after 30 days",
         duplicateScanBusyHint:
           "An AI task is running (tagging / embedding). Duplicate scanning is not blocked, but it competes for CPU and disk, so it will be slower.",
         duplicateCleanupButton: "Clean all {{count}} pending images",
@@ -4810,6 +4870,7 @@ i18n.use(initReactI18next).init({
         duplicateCleanupDescription:
           "Move {{count}} images from {{groups}} duplicate groups to this app’s Recently Deleted ({{exactGroups}} exact groups / {{exactCount}} images, {{similarGroups}} visually similar groups / {{similarCount}} images). Pending file size: {{size}}. Keepers are never cleaned; other album and tag associations are kept while the images are hidden from library views. Originals move to the system recycle bin after 30 days, and disk space is released when it is emptied.",
         duplicateConfirmCleanup: "Move to Recently Deleted",
+        duplicateCleanupPreparing: "Preparing…",
         duplicateCleanupSuccess:
           "Moved {{count}} duplicate images to Recently Deleted",
         duplicateCleanupPlanFailed:
