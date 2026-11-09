@@ -1,4 +1,4 @@
-﻿# AI Anime Image Manager LAN（局域网版 · 自用修改）
+# AI Anime Image Manager LAN（局域网版 · 自用修改）
 
 > **本项目是「AI Image Manager」的修改版** —— 基于 [Uyoung666/ai-image-manager](https://github.com/Uyoung666/ai-image-manager) **v2.2.3** 修改而来。
 > 上游采用 MIT License（Copyright © 2025 Luan Roger）；本仓库为个人自用修改版，与上游作者无关。
@@ -170,17 +170,33 @@ git apply --whitespace=nowarn ../patches/lan.patch
 > 完整改动见 Releases 里的版本说明与 [使用说明.md](使用说明.md)。
 
 
-## 下载（网盘）
+## 下载
 
-| 内容 | 链接 |
-|---|---|
-| **安装包（三个版本的 MSI）** | <https://pan.baidu.com/s/1jDBvv4tL9v5_BgYhRDJcGQ?pwd=6666>　提取码：`6666` |
-| 模型（WD14 打标）| https://huggingface.co/SmilingWolf/wd-vit-tagger-v3 |
-| 模型（中文 CLIP 语义搜索，**已随安装包提供**）| https://huggingface.co/Xenova/chinese-clip-vit-base-patch16 |
-| **CCIP 角色识别模型**（三版共用，339 MB） | <https://pan.baidu.com/s/1ZBRJIwIB7g1vuiTfoed4fA?pwd=6666> 提取码 `6666`；放法见 [CCIP模型安装说明.md](CCIP模型安装说明.md) |
+**两种拿法**：Release 页直接下（推荐，附校验信息），或网盘 <https://pan.baidu.com/s/1jDBvv4tL9v5_BgYhRDJcGQ?pwd=6666> 提取码 `6666`。
 
-> ⚠️ **版本号仍是 2.2.3**：如果你装过同一版本的旧安装包，请**先卸载旧的、再装新的**（卸载不会删图库和设置）。
+### 1. 安装包（MSI）
 
+| 版本 | 文件名 | 大约 |
+|---|---|---|
+| **WD**（本仓库，WD14 打标） | `AI Anime Image Manager WD-2.2.3.4.msi` | 665 MB |
+| NEXT（PixAI 打标） | `AI Anime Image Manager NEXT-2.2.3.6.msi` | 336 MB |
+| 本地版 | `AI Anime Image Manager-2.2.3.4.msi` | 665 MB |
+
+都在 [Releases](https://github.com/ASakurafoxA/AI-Anime-Image-Manager-WD/releases) 的最新版页面（**只保留最新一个安装包**）；
+`校验信息.md` 里有 **MD5 / SHA-256**，下完先核对。
+
+> ⚠️ 版本号仍是 **2.2.3.x**：装过旧包请**先卸载旧的、再装新的**（卸载不会删图库和设置）。
+
+### 2. 模型（两个，别搞混）
+
+| 模型 | 谁需要 | 大小 | 从哪里下载 | 解压/放到 |
+|---|---|---|---|---|
+| **WD14 打标模型**（给图片打标签） | WD / 本地版 | 361 MB | **已随安装包提供**，不用下 | 包内 |
+| **CCIP 角色识别模型**（认角色用） | 三版**共用** | 339 MB | ① Release 最新版附件 `CCIP-Model-20261018.zip`<br>② 网盘：<https://pan.baidu.com/s/1ZBRJIwIB7g1vuiTfoed4fA?pwd=6666> 提取码 `6666` | `<图库>\models\ccip\model_feat.onnx` |
+
+- **中文 CLIP（语义搜图）已随安装包提供**，不用单独下。
+- **PixAI 打标模型只有 NEXT 需要**（1.72 GB），本版用不到，不用下。
+- 放法细节：[CCIP模型安装说明.md](CCIP模型安装说明.md)、[MODELS.md](MODELS.md)
 ## 构建
 
 ```powershell
