@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 人物识别页面里的「我创建的角色」区块（NEXT 版新增）。
  *
  * 用户口径（第三、四批实测反馈）：
@@ -458,7 +458,6 @@ export function ManualRolesSection({ roles, onRenamed }: ManualRolesSectionProps
         {lightbox && (
           <PhotoLightbox
             initialIndex={lightbox.index}
-            onBackdropClick={() => setLightbox(null)}
             onClose={() => setLightbox(null)}
             open
             photos={lightbox.photos}
@@ -612,7 +611,6 @@ export function ManualRolesSection({ roles, onRenamed }: ManualRolesSectionProps
       {lightbox && (
         <PhotoLightbox
           initialIndex={lightbox.index}
-          onBackdropClick={() => setLightbox(null)}
           onClose={() => setLightbox(null)}
           open
           photos={lightbox.photos}

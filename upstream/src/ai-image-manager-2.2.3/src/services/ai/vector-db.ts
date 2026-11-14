@@ -1908,6 +1908,27 @@ export async function searchByCcipVector(
   }
 }
 
+/**
+ * 重新打开 CCIP 表句柄（2026-11-14 · 会话#12）。
+ *
+ * LanceDB 的表句柄会钉在打开那一刻的数据版本上；如果索引是在 app 启动之后重建的，
+ * 老句柄查近邻就用不到索引 → 退化成暴力扫描（离线 9ms/次，app 里 800ms/次）。
+ * 批量检索前刷成最新句柄。
+ */
+export async function reopenCcipTable(): Promise<boolean> {
+  if (!vectordb) {
+    return false;
+  }
+  try {
+    const table = await vectordb.openTable(CCIP_TABLE_NAME);
+    setCcipTable(table);
+    return true;
+  } catch (err: unknown) {
+    console.warn("[AI] reopenCcipTable failed:", getErrorMessage(err));
+    return false;
+  }
+}
+
 /** CCIP 特征表里已有多少条（用于判断角色识别能否走 CCIP）。 */
 export async function getCcipVectorCount(): Promise<number> {
   if (!ccipTable) {
