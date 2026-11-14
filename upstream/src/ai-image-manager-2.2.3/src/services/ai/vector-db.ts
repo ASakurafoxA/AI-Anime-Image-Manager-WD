@@ -1915,6 +1915,54 @@ export async function searchByCcipVector(
  * 老句柄查近邻就用不到索引 → 退化成暴力扫描（离线 9ms/次，app 里 800ms/次）。
  * 批量检索前刷成最新句柄。
  */
+/**
+ * 批量近邻检索用的**独立连接**（2026-11-14 · 会话#12）。
+ * 常驻连接在 app 里 ~300ms/次，同一张表新开连接 15ms/次 → 批量检索单独开一条，用完即关。
+ */
+export async function createCcipSearchSession(): Promise<{
+  close: () => Promise<void>;
+  search: (
+    vector: number[] | Float64Array,
+    limit: number
+  ) => Promise<Array<{ photoId: number; similarity: number }> | null>;
+} | null> {
+  try {
+    const lancedb = await import("@lancedb/lancedb");
+    const conn = await lancedb.connect(path.join(getDataPath(), "vectors"));
+    const table = await conn.openTable(CCIP_TABLE_NAME);
+    return {
+      close: async () => {
+        try {
+          await conn.close();
+        } catch {
+          /* best-effort */
+        }
+      },
+      search: async (vector, limit) => {
+        try {
+          const rows = (await table
+            .vectorSearch(Array.from(vector))
+            .distanceType("l2")
+            .limit(limit)
+            .toArray()) as Record<string, unknown>[];
+          return rows
+            .map((row) => ({
+              photoId: row.photo_id as number,
+              similarity: Math.max(0, 1 - Number(row._distance ?? 0) / 2),
+            }))
+            .filter((hit) => Number.isFinite(hit.photoId));
+        } catch (err: unknown) {
+          console.warn("[AI] session search failed:", getErrorMessage(err));
+          return null;
+        }
+      },
+    };
+  } catch (err: unknown) {
+    console.warn("[AI] createCcipSearchSession failed:", getErrorMessage(err));
+    return null;
+  }
+}
+
 export async function reopenCcipTable(): Promise<boolean> {
   if (!vectordb) {
     return false;
