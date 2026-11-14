@@ -13,6 +13,7 @@ import { faceActions } from "@/actions/faces";
 import { ipc } from "@/ipc/manager";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { CharacterDiscoveryDialog } from "@/components/character-discovery-dialog";
+import { CharacterSingleNamedDialog } from "@/components/character-single-named-dialog";
 import {
   type CharacterMissingRow,
   CharacterMissingDialog,
@@ -150,11 +151,12 @@ export function PeoplePage() {
   const [featureBusy, setFeatureBusy] = useState(false);
   /*
    * 自用（2026-10-23 · 会话#10）：用户口径「合并入口」——
-   * 原来并排两颗按钮（发现新角色 / 给已有角色补漏）名字长、像同一件事，
-   * 合成一个「角色识别」按钮 + 两项菜单；功能、接口、两道门禁都没动。
+   * 原来工具栏并排两颗按钮（发现新角色 / 给已有角色补漏）名字长、看着像同一件事，
+   * 现在合成**一个「角色识别」按钮 + 两项菜单**。功能、接口、两道门禁都没动。
    */
   const [entryOpen, setEntryOpen] = useState(false);
   const [discoveryOpen, setDiscoveryOpen] = useState(false);
+  const [singleNamedOpen, setSingleNamedOpen] = useState(false);
   const [missingOpen, setMissingOpen] = useState(false);
   const [missingRows, setMissingRows] = useState<CharacterMissingRow[]>([]);
   const [missingBusy, setMissingBusy] = useState(false);
@@ -287,7 +289,7 @@ export function PeoplePage() {
               · 但"特征还没算"（reason=vectors-missing）时必须**保持可点** ——
                 它就是补救入口 ✗
           */}
-          {!featureUsingClip && (
+          {!featureUsingClip ? (
             <Button
               disabled={featureBusy || featureRunning || featureModelMissing}
               onClick={() => void handleBuildFeatures()}
@@ -304,6 +306,21 @@ export function PeoplePage() {
                 ? t("characterFeatureBuilding")
                 : t("characterFeatureBuild")}
             </Button>
+          ) : (
+            /* 用 CLIP 特征时不需要单独建特征（文字搜图那套已经算好了）。
+               但原来这里直接空着，用户以为"按钮坏了/功能没了" —— 现在给一句说明 + 开关入口。 */
+            <>
+              <span className="text-[11px] text-muted-foreground">
+                {t("peopleModelClipHint")}
+              </span>
+              <button
+                className="text-[11px] text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+                onClick={() => navigate({ to: "/settings/behavior" })}
+                type="button"
+              >
+                {t("characterFeatureGoSettings")}
+              </button>
+            </>
           )}
           <span className="text-[11px] text-muted-foreground">
             {featureStatus?.source === "clip" || !ccipCharacterOn
@@ -386,6 +403,25 @@ export function PeoplePage() {
               </span>
               <span className="text-[11px] text-muted-foreground leading-snug">
                 {t("peopleFindUnnamedCharactersHint")}
+              </span>
+            </button>
+            {/*
+              2026-11-14（会话#12）：第三个入口——**多人图里只认出一个角色**。
+              纯数据库查询（不需要模型），所以**不参与**打标/特征那道门禁。
+            */}
+            <button
+              className="flex w-full flex-col gap-0.5 rounded-[6px] px-2.5 py-2 text-left transition-colors hover:bg-muted"
+              onClick={() => {
+                setEntryOpen(false);
+                setSingleNamedOpen(true);
+              }}
+              type="button"
+            >
+              <span className="font-medium text-[12px] text-foreground">
+                {t("characterRecognitionSingleNamed")}
+              </span>
+              <span className="text-[11px] text-muted-foreground leading-snug">
+                {t("characterSingleNamedHint")}
               </span>
             </button>
           </PopoverContent>
@@ -475,6 +511,10 @@ export function PeoplePage() {
       <CharacterDiscoveryDialog
         onOpenChange={setDiscoveryOpen}
         open={discoveryOpen}
+      />
+      <CharacterSingleNamedDialog
+        onOpenChange={setSingleNamedOpen}
+        open={singleNamedOpen}
       />
       <CharacterMissingDialog
         analyzing={missingBusy}

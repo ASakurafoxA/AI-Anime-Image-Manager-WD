@@ -167,6 +167,26 @@ export function initThumbnailer(): void {
  * first use; old files become eligible for the existing orphan cleanup.
  */
 function reconcileThumbnailCachePaths(): void {
+  /*
+   * ⚠️ 2026-11-14（会话#12）性能修复（`待办清单.md` 的「高」第 2 条）：
+   * 原来每次启动都把**全部照片**读进内存再逐行比对（7.9 万张），
+   * 用户实测「启动后一段时间点不动」。
+   * 现在先看一个**代次标记文件**：代次没变就直接跳过，一次都不读表；
+   * 只有首次（或换显示器导致 dprScale 变化）才真正扫一遍，扫完写标记。
+   */
+  const markerPath = path.join(thumbnailDir, ".reconcile-generation");
+  const generation = `v4_${dprScale}`;
+  try {
+    if (
+      fs.existsSync(markerPath) &&
+      fs.readFileSync(markerPath, "utf8").trim() === generation
+    ) {
+      return;
+    }
+  } catch {
+    // 标记读不出来就当没写过，继续走完整流程
+  }
+
   try {
     const db = getDatabase();
     const records = db
@@ -208,6 +228,11 @@ function reconcileThumbnailCachePaths(): void {
       log.info(
         `[Thumbnailer] Upgraded ${updated} cached photo reference(s) to the orientation-safe cache generation`
       );
+    }
+    try {
+      fs.writeFileSync(markerPath, generation, "utf8");
+    } catch {
+      // 写不了标记不影响本次结果，顶多下次再扫一遍
     }
   } catch (err) {
     log.warn(
