@@ -180,7 +180,7 @@ git apply --whitespace=nowarn ../patches/lan.patch
 
 - **中文 CLIP（语义搜图）已随安装包提供**，不用单独下。
 - **PixAI 打标模型只有 NEXT 需要**（压缩包 1.72 GB / 解压后 1.86 GB），本版用不到，不用下。
-- 放法细节：[CCIP模型安装说明.md](CCIP模型安装说明.md)、[MODELS.md](MODELS.md)
+- 放法细节：[MODELS.md](MODELS.md) 的「CCIP 模型（角色识别）怎么放」一节
 
 ## 构建
 
@@ -188,7 +188,7 @@ git apply --whitespace=nowarn ../patches/lan.patch
 npm install
 # 1) 打包（解出完整的运行目录）
 node node_modules/@electron-forge/cli/dist/electron-forge.js package --platform win32 --arch x64
-# 2) 打 MSI（自写 WiX 源，参数见 仓库维护规范.md）
+# 2) 打 MSI（自写 WiX 源；具体参数由维护者本地保存）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-msi-wix.ps1 `
   -ProductName "AI Anime Image Manager WD" -ExeName "ai-anime-image-manager-wd.exe" -UpgradeCode "352099e2-0299-403e-b40e-a3776a8911bd"
 # 版本号默认每次构建自增（要固定再加 -Version 2.2.3.80）
