@@ -1711,6 +1711,7 @@ export const WD14_CHARACTER_ZH: Record<string, string> = {
   "sakura_miko_(casual)": "樱巫女（便服）",
   "sakura_miku": "樱初音",
   "sakuragi_mano": "樱木真乃",
+  "sakurada_shiro_(hy_plus)": "樱田诗露",
   "sakurai_momoka": "樱井桃华",
   "sakurajima_mai": "樱岛麻衣",
   "sakurako_(blue_archive)": "歌住樱子",
